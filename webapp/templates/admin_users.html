@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Users · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Users</h1>
+
+  {% if flash.error %}<div class="banner error">{{ flash.error }}</div>{% endif %}
+  {% if flash.ok %}<div class="banner ok">{{ flash.ok }}</div>{% endif %}
+  {% if flash.temp_password %}
+  <div class="banner warn">
+    Temporary password for <strong>{{ flash.temp_for }}</strong>:
+    <code style="font-size:15px; user-select:all">{{ flash.temp_password }}</code>
+    — shown once; they will be asked to replace it at first sign-in.
+  </div>
+  {% endif %}
+
+  <div class="tablewrap">
+  <table class="results">
+    <thead>
+      <tr><th>User</th><th>Role</th><th>Status</th><th>Journals</th><th>Custom bots</th>
+          <th>Last sign-in</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td><strong>{{ u.username }}</strong>{% if u.id == me %} <span class="muted small">(you)</span>{% endif %}
+          {%- if u.id == primary_admin_id and u.username != default_username %}
+          <div class="muted small" title="the primary admin always answers to its default login name, so a rename can never lock you out">also signs in as “{{ default_username }}”</div>
+          {%- endif %}</td>
+        <td><span class="pill {{ 'recommended' if u.role == 'admin' else 'passed' }}">{{ u.role }}</span></td>
+        <td>
+          {% if u.disabled %}<span class="pill avoid">disabled</span>
+          {% elif u.must_change %}<span class="pill consider">temp password</span>
+          {% else %}<span class="pill recommended">active</span>{% endif %}
+        </td>
+        <td>{{ u.journals }}</td>
+        <td>{{ u.custom_bots }}</td>
+        <td class="muted small">{{ (u.last_login_at | localstamp) if u.last_login_at else 'never' }}</td>
+        <td>
+          <div class="row" style="gap:6px; flex-wrap:wrap">
+            <form method="post" action="/admin/users/{{ u.id }}/username" class="row" style="gap:4px">
+              <input type="text" name="username" value="{{ u.username }}" size="12"
+                     aria-label="Username for {{ u.username }}" autocomplete="off">
+              <button type="submit" class="ghost small">Rename</button>
+            </form>
+            <form method="post" action="/admin/users/{{ u.id }}/reset-password"
+                  onsubmit="return confirm('Reset the password for {{ u.username }}? Their current sessions will be signed out.')">
+              <button type="submit" class="ghost small">Reset password</button>
+            </form>
+            {% if u.id != me %}
+            <form method="post" action="/admin/users/{{ u.id }}/role">
+              <input type="hidden" name="role" value="{{ 'user' if u.role == 'admin' else 'admin' }}">
+              <button type="submit" class="ghost small">{{ 'Revoke admin' if u.role == 'admin' else 'Make admin' }}</button>
+            </form>
+            <form method="post" action="/admin/users/{{ u.id }}/disable">
+              <input type="hidden" name="disabled" value="{{ '0' if u.disabled else '1' }}">
+              <button type="submit" class="ghost small">{{ 'Enable' if u.disabled else 'Disable' }}</button>
+            </form>
+            <form method="post" action="/admin/users/{{ u.id }}/delete"
+                  onsubmit="return confirm('Delete {{ u.username }}, their {{ u.journals }} journal(s) and {{ u.custom_bots }} custom bot(s)? Bookkeeping only — any position still open on their Alpaca account stays open there. This cannot be undone.')">
+              <button type="submit" class="ghost small">Delete</button>
+            </form>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>New account</h2>
+  <form method="post" action="/admin/users/new" class="grid">
+    <label>Username
+      <input type="text" name="username" value="{{ flash.username or '' }}" required autocomplete="off"
+             autocapitalize="none" spellcheck="false" pattern="[a-z0-9][a-z0-9._-]{1,31}"
+             placeholder="lowercase letters, digits, . _ -">
+    </label>
+    <label>Temporary password <span class="muted">(optional — blank generates one)</span>
+      <input type="text" name="password" autocomplete="off" minlength="{{ min_password }}"
+             placeholder="min {{ min_password }} characters">
+    </label>
+    <label>Role
+      <select name="role">
+        {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+    </label>
+    <div style="align-self:end"><button type="submit">Create account</button></div>
+  </form>
+</div>
+{% endblock %}

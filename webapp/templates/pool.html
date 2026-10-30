@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}Shared Pool · {{ APP_TITLE }}{% endblock %}
+{% block live %}data-live="30"{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="rowspread">
+    <div>
+      <h1>Shared Gene Pool</h1>
+    </div>
+    {% if is_admin %}
+    <div class="row" style="gap:8px">
+      <form method="post" action="/pool/engine">
+        <input type="hidden" name="engine_enabled" value="{{ '' if house_engine_on else '1' }}">
+        <button type="submit" class="ghost">{{ 'Stop all fleets' if house_engine_on else 'Start all fleets' }}</button>
+      </form>
+      <form method="post" action="/pool/reset"
+            onsubmit="return confirm('Restart the multiple-comparison count for the whole installation? Every genome and its pooled record is kept — only trials from here on count toward the proven bar. Do this after a rules change that applies to everybody.');">
+        <button type="submit" class="ghost">Restart the proven bar</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Fleets running</div>
+      <div class="stat-value">{{ coverage.fleets }}</div>
+      <div class="muted small">{{ coverage.bots }} live bots between them</div></div>
+    <div class="stat"><div class="stat-label">Genomes in the pool</div>
+      <div class="stat-value">{{ coverage.pool_size }}</div>
+      <div class="muted small">{{ coverage.with_trades }} have traded · {{ coverage.pending }} waiting for a fleet</div></div>
+    <div class="stat"><div class="stat-label">Proven</div>
+      <div class="stat-value">{{ coverage.proven }}</div>
+      <div class="muted small">bar: fitness ≥ {{ proven_threshold }} over {{ bots_tested }} candidates tried</div></div>
+    <div class="stat"><div class="stat-label">Evidence per genome</div>
+      <div class="stat-value">{% if coverage.evidence_multiplier %}{{ coverage.evidence_multiplier | num(1) }}×{% else %}—{% endif %}</div>
+      <div class="muted small">{% if coverage.evidence_multiplier %}mean fleets per tested genome ·
+        {{ coverage.pooled_trades }} pooled trades{% else %}nothing has traded yet{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Shared market history</div>
+      <div class="stat-value">{{ contributions.totals.bars }} <span class="muted small">bars</span></div>
+      <div class="muted small">{{ contributions.totals.quotes }} option quotes ·
+        {{ history.quote_days or 0 }} days with real quotes</div></div>
+    <div class="stat"><div class="stat-label">Engine</div>
+      <div class="stat-value">{{ 'on' if house_engine_on else 'off' }}</div>
+      <div class="muted small">installation-wide master switch</div></div>
+  </div>
+
+</div>
+
+{% macro botref(bid, name, uid) -%}
+{%- if is_admin or uid == my_uid -%}
+<a href="/bots/{{ bid }}">{{ name }}</a>
+{%- else -%}
+<span title="another fleet's bot — the genome it runs is shared, its ledger is not">a bot in {{ usernames.get(uid, '#' ~ uid) }}'s fleet</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% if fleet.bots %}
+<div class="card">
+  <h2>All fleets combined</h2>
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Combined P&amp;L <span class="muted small">realized</span></div>
+      <div class="stat-value {{ 'pos' if fleet.total_pl_dollar > 0 else ('neg' if fleet.total_pl_dollar < 0 else '') }}">
+        {{ fleet.total_pl_pct | pct(3) }}</div>
+      <div class="muted small">{{ fleet.total_pl_dollar | money }} · {{ fleet.total_equity | money }} equity</div></div>
+    <div class="stat"><div class="stat-label">Combined P&amp;L <span class="muted small">unrealized</span></div>
+      <div class="stat-value {{ 'pos' if fleet.total_unrealized > 0 else ('neg' if fleet.total_unrealized < 0 else '') }}"
+           title="every open position in every fleet at its latest mark — not booked, and not counted in the realized figure beside it">
+        {{ fleet.total_unrealized | money }}</div>
+      <div class="muted small">{% if fleet.bots_holding %}{{ fleet.bots_holding }} bot(s) holding ·
+        {{ fleet.total_marked_equity | money }} marked equity{% else %}every fleet is flat{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Bots in profit</div>
+      <div class="stat-value">{{ fleet.in_profit }} <span class="muted small">/ {{ fleet.bots }}</span></div>
+      <div class="muted small">avg win rate {{ fleet.avg_win_rate | pct(0) if fleet.avg_win_rate is not none else '—' }}</div></div>
+    <div class="stat"><div class="stat-label">Best bot anywhere</div>
+      <div class="stat-value pos">{{ fleet.best_pl_pct | pct(1) }}</div>
+      <div class="muted small">{{ fleet.best_pl_dollar | money }} ·
+        {{ botref(fleet.best_pl_id, fleet.best_pl_name, fleet.best_pl_user) }}</div></div>
+    <div class="stat"><div class="stat-label">Highest single win</div>
+      <div class="stat-value pos">{{ fleet.highest_win | money if fleet.highest_win is not none else '—' }}</div>
+      <div class="muted small">{% if fleet.highest_win_pct is not none %}{{ fleet.highest_win_pct | pct(0) }} on premium{% endif %}{% if fleet.highest_win_id %}{{ ' · ' if fleet.highest_win_pct is not none }}{{ botref(fleet.highest_win_id, fleet.highest_win_name, fleet.highest_win_user) }}{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Best strategy</div>
+      <div class="stat-value">{{ fleet.best_strategy or '—' }}</div>
+      <div class="muted small">{{ ('avg ' ~ (fleet.best_strategy_pl | pct(1))) if fleet.best_strategy_pl is not none else 'by mean P&L' }}</div></div>
+    <div class="stat"><div class="stat-label">Activity</div>
+      <div class="stat-value">{{ fleet.closed_trades }} <span class="muted small">closed</span></div>
+      <div class="muted small">{{ fleet.open_positions }} open · avg DD {{ fleet.avg_drawdown_pct | pct(0) }}</div></div>
+    <div class="stat"><div class="stat-label">Best peak ever</div>
+      <div class="stat-value pos">{{ fleet.best_peak_pct | pct(0) }}</div>
+      <div class="muted small">{{ fleet.best_peak_dollar | money }} ·
+        {{ botref(fleet.best_peak_id, fleet.best_peak_name, fleet.best_peak_user) }}</div></div>
+    <div class="stat"><div class="stat-label">Fleet vs. baseline</div>
+      {% if fleet.avg_fleet_fitness is not none and fleet.avg_baseline_fitness is not none %}
+      <div class="stat-value {{ 'pos' if fleet.beats_baseline else 'neg' }}">
+        {{ 'beats baseline' if fleet.beats_baseline else 'not beating baseline' }}</div>
+      <div class="muted small">mean fitness {{ fleet.avg_fleet_fitness | num(3) }}
+        vs. baseline {{ fleet.avg_baseline_fitness | num(3) }}</div>
+      {% else %}
+      <div class="stat-value">—</div>
+      <div class="muted small">no rated baseline bot has traded yet</div>
+      {% endif %}</div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Who feeds the shared history</h2>
+  <div class="tbl-wrap">
+  <table class="tbl">
+    <thead><tr><th>Account</th><th class="r">Bars recorded</th><th class="r">Option quotes</th><th class="r">Days</th></tr></thead>
+    <tbody>
+      {% for uid, c in contributions.by_user.items() %}
+      <tr>
+        <td class="rowhead">{{ usernames.get(uid, 'yfinance (no account)' if uid == 0 else '#' ~ uid) }}</td>
+        <td class="r" data-label="Bars recorded">{{ c.bars }}</td>
+        <td class="r" data-label="Option quotes">{{ c.quotes }}</td>
+        <td class="r" data-label="Days">{{ c.days }}</td>
+      </tr>
+      {% else %}
+      <tr class="empty"><td colspan="4" class="muted">Nothing recorded yet — the recorder fills this in as cycles run.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="rowspread">
+    <h2>Population <span class="muted small">{{ rows|length }}{% if rows|length != total_rows %} of {{ total_rows }}{% endif %}</span></h2>
+  </div>
+  <div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>Genome</th><th>Family</th><th class="r">Gen</th>
+        <th class="r">Fleets</th><th class="r">Pooled trades</th><th class="r">Days</th>
+        <th class="r">Fitness</th><th>Status</th><th>Clone</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="rowhead">
+          <code class="small">{{ r.fingerprint[:8] }}</code>
+          <div class="muted small">{{ r.genome_desc }}</div>
+        </td>
+        <td data-label="Family">{{ r.family or '?' }}</td>
+        <td class="r" data-label="Gen">{{ r.generation }}</td>
+        <td class="r" data-label="Fleets" title="{{ r.user_names | join(', ') }}">
+          <span>{{ r.users }}{% if r.running_here %} <span class="pill recommended">yours</span>{% endif %}</span></td>
+        <td class="r" data-label="Pooled trades">{{ r.closed_count }}</td>
+        <td class="r" data-label="Days">{{ r.active_days }}</td>
+        <td class="r {{ 'pos' if r.robust_fitness > 0 else 'neg' }}" data-label="Fitness">{{ r.robust_fitness | num(2) }}</td>
+        <td data-label="Status">
+          <span>
+          {% if r.proven %}<span class="pill recommended">proven</span>
+          {% elif r.promising %}<span class="pill consider">promising</span>
+          {% elif r.eligible %}<span class="pill">eligible</span>
+          {% else %}<span class="muted small">testing</span>{% endif %}
+          {% if not r.running %}<span class="muted small">· idle</span>{% endif %}
+          </span>
+        </td>
+        <td class="cellform">
+          <form method="post" action="/bots/custom/clone-genome" class="row" style="gap:4px">
+            <input type="hidden" name="fingerprint" value="{{ r.fingerprint }}">
+            <input type="number" name="allocation" placeholder="$" min="1" step="100" style="width:6rem">
+            <button type="submit" class="ghost">Clone</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr class="empty"><td colspan="9" class="muted">No genome has traded yet. Connect a fleet on the
+        <a href="/bots">Bot Fleet</a> page and the population starts filling in.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{% if pending %}
+<div class="card">
+  <h2>Waiting for a fleet</h2>
+  <ul class="muted small" style="margin:0 0 0 18px">
+    {% for e in pending %}
+    <li><code>{{ e.fingerprint[:8] }}</code> — {{ e.genome_desc if e.genome_desc else e.family }},
+      {{ e.pooled.closed_count }} trade(s) so far</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

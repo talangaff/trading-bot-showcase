@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Engine history · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card">
+  <a class="back" href="/bots{{ fleet_qs }}">← Bot Fleet</a>
+  <h1>Engine history</h1>
+</div>
+
+<div class="card">
+  {% if not events %}
+    <p class="muted">Nothing logged yet.</p>
+  {% else %}
+  <div class="tablewrap">
+  <table class="results">
+    <thead><tr><th>When</th><th>Event</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+      <tr>
+        <td class="small">{{ e.ts | localstamp }}</td>
+        <td><span class="pill {{ 'recommended' if e.kind == 'reset' else 'passed' }}">{{ e.kind }}</span></td>
+        <td class="small" style="text-align:left; white-space:normal">
+          {% for k, v in e.detail.items() %}<b>{{ k }}</b>: {{ v }}{{ " · " if not loop.last }}{% endfor %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

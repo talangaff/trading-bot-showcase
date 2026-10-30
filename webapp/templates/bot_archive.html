@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Bot archive · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card">
+  <a class="back" href="/bots{{ fleet_qs }}">← Bot Fleet</a>
+  <h1>Archived bots</h1>
+  <p class="muted small">Kept permanently, even after max drawdown. Auto-saved when a bot up ≥50% then
+    fails; can also save manually from a bot's page.</p>
+</div>
+
+<div class="card">
+  {% if not rows %}
+    <p class="muted">Nothing archived yet.</p>
+  {% else %}
+  <div class="tablewrap">
+  <table class="results">
+    <thead><tr>
+      <th>Name</th><th>Reason</th><th>Peak P&amp;L</th><th>Final P&amp;L</th><th>Final balance</th>
+      <th>Gen</th><th>Genome</th><th>Archived</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="sym">{{ r.name }}</td>
+        <td class="small">{{ r.reason }}</td>
+        <td class="pos">{{ r.peak_pl_pct | pct(0) }}</td>
+        <td class="{{ 'pos' if r.final_pl_pct and r.final_pl_pct > 0 else ('neg' if r.final_pl_pct and r.final_pl_pct < 0 else '') }}">{{ r.final_pl_pct | pct }}</td>
+        <td>{{ r.final_balance | money }}</td>
+        <td>{{ r.generation or 0 }}</td>
+        <td class="small" style="text-align:left; white-space:normal">{{ r.genome_desc }}</td>
+        <td class="small">{{ r.archived_at | localstamp }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

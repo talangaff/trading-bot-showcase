@@ -1,0 +1,559 @@
+{% extends "base.html" %}
+{% block title %}Bot Fleet · {{ APP_TITLE }}{% endblock %}
+{% block live %}data-live="30"{% endblock %}
+{% block content %}
+{% if not is_own_fleet %}
+<div class="banner warn">Viewing <strong>{{ fleet_owner }}</strong>'s fleet{{ '' if can_manage_fleet else ' read-only' }} — their bots, their
+  Alpaca account. <a href="/bots">Back to your own fleet</a>.</div>
+{% endif %}
+{% if not house_engine_on %}
+<div class="banner warn">The engine is switched off for the whole installation, so no fleet is trading.
+  {% if is_admin %}Turn it back on from the <a href="/pool">Shared Pool</a> page.{% else %}An admin can turn it back on.{% endif %}</div>
+{% endif %}
+<div class="card plain">
+  <div class="rowspread">
+    <div>
+      <h1>{% if is_own_fleet %}Your{% else %}{{ fleet_owner }}'s{% endif %} 0DTE Options Bot Fleet</h1>
+    </div>
+    <div class="row" style="gap:8px;align-items:center">
+      <form method="post" action="/bots/refresh{{ ('?' ~ request.url.query) if request.url.query }}">
+        <button type="submit" title="Re-read every bot's ledger, recompute the stats and re-query Alpaca. A browser reload alone can return cached numbers up to a minute old.">↻ Refresh</button>
+      </form>
+      <span class="muted small" title="when this page was built">as of {{ rendered_at }}</span>
+      {% if can_manage_fleet %}
+      <form method="post" action="/bots/run{{ fleet_qs }}"><button type="submit" class="ghost">Run cycle now</button></form>
+      {% endif %}
+      {# both pages are owner-or-admin only, so on a fleet you cannot manage they
+         would quietly show YOUR archive/history under this fleet's heading #}
+      {% if can_manage_fleet %}
+      <a class="ghost btn" href="/bots/archive{{ fleet_qs }}">Archive ({{ counts.archived }})</a>
+      <a class="ghost btn" href="/bots/history{{ fleet_qs }}">History</a>
+      {% endif %}
+    </div>
+  </div>
+  {% if other_fleets and other_fleets | length > 1 %}
+  <form method="get" action="/bots" class="row" style="gap:6px;margin-top:6px">
+    <input type="hidden" name="scope" value="{{ scope }}">
+    <label class="muted small">Fleet
+      <select name="user" onchange="this.form.submit()">
+        {% for f in other_fleets %}
+        <option value="{{ f.id }}" {{ 'selected' if f.id == fleet_uid }}>{{ f.username }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% if not can_manage_fleet %}
+    <span class="muted small" style="align-self:center"
+          title="every fleet breeds from the same shared gene pool, so their results are worth reading — but only the owner can change or run one">read-only — this is {{ fleet_owner }}'s fleet</span>
+    {% endif %}
+  </form>
+  {% endif %}
+
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Active bots</div>
+      <div class="stat-value">{{ counts.active }} <span class="muted small"
+        title="fleet size — the daily pass refills to it and nothing can spawn past it">/ {{ limits.fleet_cap }}</span></div>
+      <div class="muted small" title="every maintenance pass refills the fleet to this many">refilled to {{ limits.fleet_cap }} daily</div></div>
+    <div class="stat"><div class="stat-label">Retired</div>
+      <div class="stat-value">{{ counts.retired or 0 }}</div></div>
+    <div class="stat"><div class="stat-label">Archived (kept)</div>
+      <div class="stat-value">{{ counts.archived }}</div></div>
+    <div class="stat"><div class="stat-label">Engine</div>
+      <div class="stat-value">{{ 'on' if engine_on else 'off' }} <span class="muted small">· live</span></div>
+      <div class="muted small">{{ 'Alpaca keys connected' if settings.connected else 'no keys — not trading' }}</div></div>
+    {% if account %}
+    <div class="stat"><div class="stat-label">Your Alpaca account</div>
+      {% if account.error %}
+      <div class="stat-value neg">unreachable</div>
+      <div class="muted small">{{ account.error }}</div>
+      {% else %}
+      <div class="stat-value">{{ account.equity | money if account.equity is not none else '—' }}</div>
+      <div class="muted small">{{ account.account_number or '?' }} · {{ account.status or '?' }} ·
+        options BP {{ account.options_buying_power | money if account.options_buying_power is not none else '—' }}
+        · options level {{ account.options_trading_level if account.options_trading_level is not none else '?' }}</div>
+      {% endif %}</div>
+    {% endif %}
+    {% if reconcile %}
+    <div class="stat"><div class="stat-label">Ledgers vs. account</div>
+      {% if reconcile.error %}
+      <div class="stat-value neg">unknown</div><div class="muted small">{{ reconcile.error }}</div>
+      {% elif reconcile.ok %}
+      <div class="stat-value pos">in sync</div>
+      <div class="muted small">{{ reconcile.symbols }} contract(s) held by {{ reconcile.bots }} bot(s) · checked {{ reconcile.ts | localstamp }}</div>
+      {% else %}
+      <div class="stat-value neg">{{ reconcile.mismatches | length }} mismatch · {{ reconcile.unclaimed | length }} unclaimed</div>
+      <div class="muted small">checked {{ reconcile.ts | localstamp }} — see below</div>
+      {% endif %}</div>
+    {% endif %}
+    {% if api and api.account %}
+    <div class="stat"><div class="stat-label">Peak Alpaca calls/min</div>
+      <div class="stat-value {{ 'neg' if api.apis.trading.pct_of_limit and api.apis.trading.pct_of_limit >= 80 }}">
+        {{ api.apis.trading.peak }} <span class="muted small">/ {{ api.limit }}</span></div>
+      <div class="muted small">
+        {%- if api.apis.trading.peak %}
+        trading, busiest minute {{ api.apis.trading.peak_at }}Z
+        {%- if api.apis.trading.peak_bots %} with {{ api.apis.trading.peak_bots }} bot(s) &mdash;
+        {{ api.apis.trading.per_bot | num(2) }}/bot/min, so ~{{ api.apis.trading.bots_at_limit }}
+        bots would reach the limit{% endif %}
+        {%- else %}no trading calls recorded yet{% endif %}
+        · data peak {{ api.apis.data.peak }} · this minute {{ api.apis.trading.now }}
+      </div></div>
+    {% endif %}
+    <div class="stat"><div class="stat-label">Options quotes</div>
+      <div class="stat-value">
+        {% for sym, src in option_sources.items() %}{{ sym }}: {{ src }}{{ ", " if not loop.last }}{% endfor %}
+      </div>
+      <div class="muted small">real bid/ask blended into the modeled chain where a provider has it</div></div>
+    <div class="stat"><div class="stat-label">Shared history</div>
+      <div class="stat-value">
+        {% for sym in symbol_names if sym != 'all' %}{{ sym }}: {{ history[sym].days if history.get(sym) else 0 }}d{{ ", " if not loop.last }}{% endfor %}
+      </div>
+      <div class="muted small" title="python -m webapp.recorder backfill / python -m webapp.replay evolve">
+        {{ history.quote_days or 0 }} days with real quotes · pooled from
+        {{ history.contributions.totals.contributors if history.contributions else 0 }} connected account(s)</div></div>
+    <div class="stat"><div class="stat-label">Shared gene pool</div>
+      <div class="stat-value">{{ pool_coverage.pool_size }}
+        <span class="muted small">/ {{ pool_coverage.proven }} proven</span></div>
+      <div class="muted small"><a href="/pool">{{ pool_coverage.shared_genomes }} genome(s) under test by more
+        than one fleet</a></div></div>
+  </div>
+
+  {% if settings.needs_keys %}
+  <div class="banner warn">This fleet has no Alpaca keys saved, so none of its bots can place an order and it
+    is not trading. Every fleet places real orders on its own paper account — there is no modeled mode to run
+    without one, and your fleet never falls back to anyone else's. Add its paper keys on the
+    <a href="/bots/accounts">Accounts page</a>.</div>
+  {% endif %}
+  {% if pending_count %}
+  <div class="banner warn">{{ pending_count }} real order(s) journaled but not yet booked — the next cycle looks them
+    up on Alpaca and books whatever filled.</div>
+  {% endif %}
+  {% if reconcile and not reconcile.ok and not reconcile.error %}
+  <div class="banner warn">
+    <b>Ledgers don't match the fleet account.</b> Nothing is changed automatically (except a contract the account no
+    longer holds at all, which is closed in the ledger at its last mark). Check these against Alpaca:
+    <ul style="margin:6px 0 0 18px">
+      {% for m in reconcile.mismatches %}
+      <li><span class="sym">{{ m.symbol }}</span> — ledgers claim {{ m.ledger | num(0) }}, account holds {{ m.account | num(0) }}
+        ({% for bid, q in m.bots.items() %}<a href="/bots/{{ bid }}">#{{ bid }}</a>: {{ q | num(0) }}{{ ', ' if not loop.last }}{% endfor %})</li>
+      {% endfor %}
+      {% for u in reconcile.unclaimed %}
+      <li><span class="sym">{{ u.symbol }}</span> — {{ u.account | num(0) }} on the account, no bot claims it</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if capital and capital.bots %}
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Peak capital needed</div>
+      <div class="stat-value {{ 'neg' if capital.oversubscribed }}">{{ capital.max_exposure | money }}</div>
+      <div class="muted small">most premium {{ capital.bots }} bot(s) could hold at once
+        ({{ limits.position | round(0) | int }}% cap each) — this is what the account must fund</div></div>
+    <div class="stat"><div class="stat-label">Held right now</div>
+      <div class="stat-value">{{ capital.open_cost | money }}</div>
+      <div class="muted small">{% if capital.utilization is not none %}{{ capital.utilization | pct(0) }} of options buying power{% else %}account not readable{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Virtual capital</div>
+      <div class="stat-value">{{ capital.committed | money }}</div>
+      <div class="muted small">sum of the bots' own ledgers — bookkeeping only, never needs to exist as cash</div></div>
+  </div>
+  {% if capital.oversubscribed %}
+  <div class="banner warn">
+    <b>The account may not cover a fully-loaded fleet.</b> If every bot filled its position cap at once they
+    would need {{ capital.max_exposure | money }}, but the account can fund {{ (capital.options_buying_power if capital.options_buying_power is not none else capital.equity) | money }}
+    — short by about {{ capital.short_by | money }}. Nothing breaks: entries that don't fit are refused and
+    logged rather than sent, so no bot gets an unfair edge from ordering. To give it more room, either lower
+    the fleet target / per-bot balance, or raise the paper balance in Alpaca's dashboard
+    (<b>Reset</b> — note that wipes the account's history and issues new API keys, so do it while the fleet is
+    flat and paste the new keys in below).
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if fleet.bots %}
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Fleet P&amp;L <span class="muted small">realized</span></div>
+      <div class="stat-value {{ 'pos' if fleet.total_pl_dollar > 0 else ('neg' if fleet.total_pl_dollar < 0 else '') }}">
+        {{ fleet.total_pl_pct | pct(3) }}</div>
+      <div class="muted small">{{ fleet.total_pl_dollar | money }} · {{ fleet.total_equity | money }} equity</div></div>
+    <div class="stat"><div class="stat-label">Fleet P&amp;L <span class="muted small">unrealized</span></div>
+      <div class="stat-value {{ 'pos' if fleet.total_unrealized > 0 else ('neg' if fleet.total_unrealized < 0 else '') }}"
+           title="every open position across the fleet at its latest mark — not booked, and not counted in the realized figures beside it">
+        {{ fleet.total_unrealized | money }}</div>
+      <div class="muted small">{% if fleet.bots_holding %}{{ fleet.bots_holding }} bot(s) holding ·
+        {{ fleet.total_marked_equity | money }} marked equity{% else %}fleet is flat{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Bots in profit</div>
+      <div class="stat-value">{{ fleet.in_profit }} <span class="muted small">/ {{ fleet.bots }}</span></div>
+      <div class="muted small">avg win rate {{ fleet.avg_win_rate | pct(0) if fleet.avg_win_rate is not none else '—' }}</div></div>
+    <div class="stat"><div class="stat-label">Best bot</div>
+      <div class="stat-value pos">{{ fleet.best_pl_pct | pct(1) }}</div>
+      <div class="muted small">{{ fleet.best_pl_dollar | money }} ·
+        <a href="/bots/{{ fleet.best_pl_id }}">{{ fleet.best_pl_name }}</a></div></div>
+    <div class="stat"><div class="stat-label">Highest single win</div>
+      <div class="stat-value pos">{{ fleet.highest_win | money if fleet.highest_win is not none else '—' }}</div>
+      <div class="muted small">{% if fleet.highest_win_pct is not none %}{{ fleet.highest_win_pct | pct(0) }} on premium{% endif %}{% if fleet.highest_win_id %}{{ ' · ' if fleet.highest_win_pct is not none }}<a href="/bots/{{ fleet.highest_win_id }}">{{ fleet.highest_win_name }}</a>{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Best strategy</div>
+      <div class="stat-value">{{ fleet.best_strategy or '—' }}</div>
+      <div class="muted small">{{ ('avg ' ~ (fleet.best_strategy_pl | pct(1))) if fleet.best_strategy_pl is not none else 'by mean P&L' }}</div></div>
+    <div class="stat"><div class="stat-label">Activity</div>
+      <div class="stat-value">{{ fleet.closed_trades }} <span class="muted small">closed</span></div>
+      <div class="muted small">{{ fleet.open_positions }} open · avg DD {{ fleet.avg_drawdown_pct | pct(0) }}</div></div>
+    <div class="stat"><div class="stat-label">Best peak ever</div>
+      <div class="stat-value pos">{{ fleet.best_peak_pct | pct(0) }}</div>
+      <div class="muted small">{{ fleet.best_peak_dollar | money }} ·
+        <a href="/bots/{{ fleet.best_peak_id }}">{{ fleet.best_peak_name }}</a></div></div>
+  </div>
+  {% endif %}
+
+  {% if baseline %}
+  <div class="card" style="margin-top:10px;background:var(--bg);border-color:var(--grey)">
+    <div class="rowspread">
+      <div>
+        <div class="muted small" style="font-weight:600">Fleet vs. null-hypothesis baseline</div>
+      </div>
+      {% if fleet.avg_baseline_fitness is not none and fleet.avg_fleet_fitness is not none %}
+      <div class="stat" style="text-align:right">
+        <div class="stat-label">Verdict</div>
+        <div class="stat-value {{ 'pos' if fleet.beats_baseline else 'neg' }}">
+          {{ 'beats baseline' if fleet.beats_baseline else 'not beating baseline' }}</div>
+        <div class="muted small">fleet fitness {{ fleet.avg_fleet_fitness | round(3) }}
+          vs. baseline {{ fleet.avg_baseline_fitness | round(3) }}</div>
+      </div>
+      {% endif %}
+    </div>
+    <div class="tablewrap">
+    <table class="results">
+      <thead><tr><th>Bot</th><th>Strategy</th><th>Symbol</th><th>P&amp;L</th>
+        <th title="t-statistic of baseline-adjusted per-trade return on premium">Fitness</th><th>Recent fitness</th><th>Trades</th></tr></thead>
+      <tbody>
+        {% for b in baseline %}
+        <tr>
+          <td><a href="/bots/{{ b.id }}">{{ b.name }}</a></td>
+          <td>{{ b.strategy }}</td>
+          <td>{{ b.symbol }}</td>
+          <td class="{{ 'pos' if (b.pl_pct or 0) > 0 else ('neg' if (b.pl_pct or 0) < 0 else '') }}">
+            {{ b.pl_pct | pct(1) if b.pl_pct is not none else '—' }}</td>
+          <td>{{ b.fitness | round(3) }}</td>
+          <td>{{ b.fitness_recent | round(3) if b.fitness_recent is not none else '—' }}</td>
+          <td>{{ b.closed_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if families %}
+  <div style="margin-top:10px">
+    <div class="tablewrap">
+    <table class="results">
+      <thead><tr><th>Family</th><th>Active</th><th>Proven</th><th>Eligible</th>
+        <th title="mean robust fitness across the family">Avg fitness</th><th>Avg P&amp;L</th><th>Best bot</th></tr></thead>
+      <tbody>
+        {% for f in families %}
+        <tr>
+          <td>{{ f.family }}</td>
+          <td>{{ f.count }}</td>
+          <td class="{{ 'pos' if f.proven }}">{{ f.proven }}</td>
+          <td>{{ f.eligible }}</td>
+          <td class="{{ 'pos' if f.avg_fitness > 0 else ('neg' if f.avg_fitness < 0 else '') }}">{{ f.avg_fitness | num(2) }}</td>
+          <td class="{{ 'pos' if f.avg_pl_pct > 0 else ('neg' if f.avg_pl_pct < 0 else '') }}">{{ f.avg_pl_pct | pct(1) }}</td>
+          <td><a href="/bots/{{ f.best_id }}">{{ f.best_name }}</a>
+            <span class="muted small">fitness {{ f.best_fitness | num(2) }}{% if f.best_pl_pct is not none %} · {{ f.best_pl_pct | pct(1) }}{% endif %}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if strategy_mix %}
+  <div style="margin-top:10px">
+    <div class="muted small" style="margin-bottom:4px">Active fleet by strategy</div>
+    <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--bg2, #e5e5e5)">
+      {% set colours = ['var(--green, #3aa76d)', 'var(--blue, #4a7fd0)', 'var(--amber, #d0a24a)', 'var(--grey, #999)'] %}
+      {% for m in strategy_mix %}
+      <div title="{{ m.strategy }}: {{ m.count }} bot(s) · {{ m.share | round(0) }}%"
+           style="width:{{ m.share }}%;background:{{ colours[loop.index0 % 4] }}"></div>
+      {% endfor %}
+    </div>
+    <div class="row small muted" style="gap:12px;margin-top:4px;flex-wrap:wrap">
+      {% for m in strategy_mix %}
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:{{ colours[loop.index0 % 4] }}"></span>
+        {{ m.strategy }} — {{ m.count }} ({{ m.share | round(0) }}%)</span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if can_manage_fleet %}
+  <details class="settings-panel" style="margin-top:12px" {{ 'open' if not settings.connected }}>
+    <summary><strong>{{ '⚙︎ Fleet engine' if settings.connected else '➕ Connect your fleet\'s Alpaca paper account' }}</strong>
+      <span class="muted small">{{ '— connected' if settings.connected else '— no keys: add them on the Accounts page, or the fleet does not trade' }}</span></summary>
+    {% if atest %}
+    <div class="banner {{ 'ok' if atest[0] == '1' else 'error' }}" style="margin-top:10px">
+      {{ '✓ ' if atest[0] == '1' else '✗ ' }}{{ atest[1:] }}
+    </div>
+    {% endif %}
+    {% if otest %}
+    <div class="banner {{ 'ok' if otest[0] == '1' else 'error' }}" style="margin-top:10px">
+      {{ '✓ ' if otest[0] == '1' else '✗ ' }} options data — {{ otest[1:] }}
+    </div>
+    {% endif %}
+    {% if reset_count is not none %}
+    <div class="banner ok" style="margin-top:10px">
+      ✓ Fleet reset — {{ reset_count }} retired, {{ spawned }} fresh bots spawned.
+    </div>
+    {% elif spawn_asked is not none %}
+    <div class="banner warn" style="margin-top:10px">
+      Spawned {{ spawned }} of the {{ spawn_asked }} requested — your fleet is at its
+      <a href="/guardrails{{ fleet_qs }}">guardrail</a> of {{ limits.fleet_cap }} bots.
+    </div>
+    {% elif spawned is not none %}
+    <div class="banner ok" style="margin-top:10px">✓ Spawned {{ spawned }} bots.</div>
+    {% endif %}
+    <form method="post" action="/bots/settings{{ fleet_qs }}" class="grid" style="margin-top:10px">
+      <label class="check"><input type="checkbox" name="engine_enabled" value="1" {{ 'checked' if settings.engine_enabled }}> My fleet trades</label>
+      <div style="align-self:end"><button type="submit" class="ghost">Save settings</button></div>
+    </form>
+    <p class="muted small" style="margin-top:8px">The fleet's Alpaca keys and data feed are managed on the
+      <a href="/bots/accounts">Accounts page</a>.</p>
+    <form method="post" action="/bots/options-test{{ fleet_qs }}" style="margin-top:8px">
+      <button type="submit" class="ghost">Test options data</button>
+      <span class="muted small">probes Alpaca options data and yfinance for today's SPY chain right now</span>
+    </form>
+    <form method="post" action="/bots/spawn{{ fleet_qs }}" class="row" style="margin-top:8px">
+      <label>Add <input type="number" name="count"
+                        value="{{ [10, limits.fleet_headroom] | min }}" min="1"
+                        max="{{ [100, limits.fleet_headroom] | min }}" style="width:5rem"
+                        {{ 'disabled' if limits.fleet_headroom < 1 }}> bots</label>
+      <button type="submit" class="ghost" {{ 'disabled' if limits.fleet_headroom < 1 }}>Spawn</button>
+      <span class="muted small">candidates drawn from the shared pool — never one another fleet is already testing.
+        {% if limits.fleet_headroom < 1 %}
+        <strong>Fleet is at its guardrail of {{ limits.fleet_cap }} bots</strong> — raise it on the
+        <a href="/guardrails{{ fleet_qs }}">Guardrails</a> page to add more.
+        {% else %}
+        Room for {{ limits.fleet_headroom }} more before your
+        <a href="/guardrails{{ fleet_qs }}">guardrail</a> of {{ limits.fleet_cap }}.
+        {% endif %}</span>
+    </form>
+    <form method="post" action="/bots/reset{{ fleet_qs }}" style="margin-top:8px"
+          onsubmit="return confirm('Retire every active bot in this fleet and reseed a full fleet of {{ limits.fleet_cap }} fresh candidates? Other users\' fleets, your custom and baseline bots, and everything the shared pool has learned are untouched. Retired bots keep their history under Archive/All.');">
+      <button type="submit" class="ghost">Reset my fleet</button>
+      <span class="muted small">retires this fleet and reseeds fresh — use once after a rules change (fill pricing, guardrails, breeding) so results reflect only the current rules. Only your own bots.</span>
+    </form>
+  </details>
+  {% endif %}
+</div>
+
+<div class="card" id="incubator">
+  <div class="rowspread">
+    <h2>Incubator <span class="muted small">{{ incubator.active }} / {{ incubator.target }} simulated bots</span></h2>
+  </div>
+  <p class="muted small" style="margin-top:0">Simulated bots run the same strategy code as the fleet on the live market,
+    with modeled fills and <b>no orders</b>, so far more genomes are tested at once. One that trades enough, stays in
+    profit and inside the drawdown guardrail graduates into this fleet as a real-fill bot; the best performers are the
+    parents of the next generation. Fleet bots that are doing well are never replaced.</p>
+  <div class="agg">
+    <div class="stat"><div class="stat-label">Under test</div>
+      <div class="stat-value">{{ incubator.active }}</div>
+      <div class="muted small">{{ incubator.trading }} have traded · {{ incubator.trades }} closed trades</div></div>
+    <div class="stat"><div class="stat-label">In profit</div>
+      <div class="stat-value">{{ incubator.in_profit }}<span class="muted small"> / {{ incubator.rated }}</span></div>
+      <div class="muted small">of bots with enough trades to rate</div></div>
+    <div class="stat"><div class="stat-label">Waiting to graduate</div>
+      <div class="stat-value">{{ incubator.graduates }}</div>
+      <div class="muted small">promoted into the fleet as slots open</div></div>
+    <div class="stat"><div class="stat-label">Promoted so far</div>
+      <div class="stat-value">{{ incubator.promoted }}</div>
+      <div class="muted small">{{ incubator.retired_recent }} retired in the last few days</div></div>
+  </div>
+  {% set cap = incubator.capacity %}
+  <p class="small" style="margin:8px 0 0">
+    <b>Room to grow:</b>
+    {% if cap.verdict == 'measuring' %}<span class="muted">measuring — {{ cap.detail }}</span>
+    {% else %}
+      {% if cap.verdict == 'room' %}<span class="pos">room</span>{% elif cap.verdict == 'tight' %}<span>tight</span>{% else %}<span class="neg">full</span>{% endif %}
+      <span class="muted">— {{ (cap.coverage * 100) | round | int }}% of sim steps made,
+        a sim pass uses {{ cap.pass_s | num(1) }}s of its {{ cap.budget_s | int }}s budget,
+        cycle {{ cap.cycle_s | num(0) }}s of 60s{% if cap.verdict != 'full' and cap.more_fit %};
+        about {{ cap.more_fit }} more sim bots would fit in total{% endif %}</span>
+    {% endif %}
+  </p>
+  {% if incubator.generations %}
+  <h3 style="margin-bottom:4px">Fitness by generation
+    <span class="muted small">bots with 8+ trades; gen 0 is random, each later generation is bred from the best of the one before</span></h3>
+  <div class="tablewrap"><table class="results">
+    <thead><tr><th>Generation</th><th>Bots</th><th>Mean fitness</th><th>Best fitness</th></tr></thead>
+    <tbody>
+    {% for g in incubator.generations %}
+      <tr><td>{{ g.gen }}</td><td>{{ g.n }}</td><td>{{ g.mean | num(2) }}</td><td>{{ g.best | num(2) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  {% if incubator.leaders %}
+  {% set base = '?' ~ ('user=' ~ fleet_uid ~ '&' if not is_own_fleet else '') ~ 'sim_sort=' %}
+  <h3 style="margin-bottom:4px">Leading simulated bots
+    <span class="muted small">sort by
+      {% if incubator.sim_sort == 'fitness' %}<b>fitness</b>{% else %}<a href="{{ base }}fitness#incubator">fitness</a>{% endif %} ·
+      {% if incubator.sim_sort == 'pl' %}<b>P&amp;L</b>{% else %}<a href="{{ base }}pl#incubator">P&amp;L</a>{% endif %}</span></h3>
+  <div class="tablewrap"><table class="results">
+    <thead><tr><th>Bot</th><th>Gen</th><th>Strategy</th><th>Trades</th><th>Sessions</th><th>Fitness</th><th>P&amp;L</th><th></th></tr></thead>
+    <tbody>
+    {% for t in incubator.leaders %}
+      <tr><td>{{ t.name }}</td><td>{{ t.generation }} <span class="muted small">{{ t.origin }}</span></td>
+          <td class="small">{{ t.desc }}</td><td>{{ t.trades }}</td><td>{{ t.days }}</td>
+          <td>{{ t.fitness | num(2) }}</td><td>{{ t.pl_pct | pct(1) }}</td>
+          <td>{% if t.graduate %}<span class="pill">graduate</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  {% if incubator.recent %}
+  <div class="muted small" style="margin-top:8px">Recent:
+    {% for e in incubator.recent %}
+      {{ e.ts | localstamp }} — {% if e.kind == 'graduate' %}a simulated bot (gen {{ e.detail.generation }}, {{ e.detail.trades }} trades, fitness {{ e.detail.fitness }}) graduated into the fleet{% else %}a fleet bot ({{ e.detail.return_pct }}% over {{ e.detail.window_days|int }}d) was swapped out for a graduate ({{ e.detail.graduate_return_pct }}%){% endif %}{{ "; " if not loop.last }}
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if not incubator.at %}<div class="muted small">The incubator has not run yet — it fills on its next 5-minute pass.</div>{% endif %}
+</div>
+
+<div class="card">
+  {# carries the fleet being viewed through every tab, filter and reset link;
+     without it each of them lands back on the viewer's own fleet #}
+  {% set qs = ('user=' ~ fleet_uid ~ '&' if not is_own_fleet else '') ~ 'sort=' ~ sort ~ '&strategy=' ~ filters.strategy ~ '&symbol=' ~ filters.symbol ~ '&proven=' ~ filters.proven ~ '&style=' ~ filters.style ~ '&value=' ~ filters.value ~ '&q=' ~ (filters.q | urlencode) %}
+  {% set marked = filters.value == 'marked' %}
+  <div class="rowspread">
+    <h2>{{ 'All bots' if scope == 'all' else ('Retired' if scope == 'retired' else 'Active fleet') }}
+      <span class="muted small">{{ rows|length }}{% if rows|length != total_rows %} of {{ total_rows }}{% endif %}</span></h2>
+    <div class="tabs">
+      <a class="tab {{ 'on' if scope == 'active' }}" href="/bots?scope=active&{{ qs }}">Active</a>
+      <a class="tab {{ 'on' if scope == 'retired' }}" href="/bots?scope=retired&{{ qs }}">Retired</a>
+      <a class="tab {{ 'on' if scope == 'all' }}" href="/bots?scope=all&{{ qs }}">All</a>
+    </div>
+  </div>
+
+  <form method="get" action="/bots" class="row" style="margin-top:10px; gap:14px">
+    <input type="hidden" name="scope" value="{{ scope }}">
+    {% if not is_own_fleet %}<input type="hidden" name="user" value="{{ fleet_uid }}">{% endif %}
+    <label>Search
+      <input type="search" name="q" value="{{ filters.q }}" placeholder="bot name"
+             onchange="this.form.submit()" style="min-width:150px">
+    </label>
+    <label>Sort
+      <select name="sort" onchange="this.form.submit()">
+        {% for key, label in sort_options %}
+        <option value="{{ key }}" {{ 'selected' if sort == key }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Strategy
+      <select name="strategy" onchange="this.form.submit()">
+        {% for s in strategy_names %}
+        <option value="{{ s }}" {{ 'selected' if filters.strategy == s }}>{{ 'All' if s == 'all' else s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Symbol
+      <select name="symbol" onchange="this.form.submit()">
+        {% for s in symbol_names %}
+        <option value="{{ s }}" {{ 'selected' if filters.symbol == s }}>{{ 'All' if s == 'all' else s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Track record
+      <select name="proven" onchange="this.form.submit()">
+        <option value="all" {{ 'selected' if filters.proven == 'all' }}>All</option>
+        <option value="proven" {{ 'selected' if filters.proven == 'proven' }}>Proven only</option>
+        <option value="unproven" {{ 'selected' if filters.proven == 'unproven' }}>Unproven only</option>
+      </select>
+    </label>
+    <label>Style
+      <select name="style" onchange="this.form.submit()">
+        {% for s in style_names %}
+        <option value="{{ s }}" {{ 'selected' if filters.style == s }}>{{ 'All' if s == 'all' else s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label title="what each card shows: money actually booked, or that plus every open position at its latest mark. The scoreboard above is the whole fleet either way.">Card value
+      <select name="value" onchange="this.form.submit()">
+        <option value="realized" {{ 'selected' if not marked }}>Realized</option>
+        <option value="marked" {{ 'selected' if marked }}>Realized + unrealized</option>
+      </select>
+    </label>
+    <noscript><button type="submit" class="ghost">Apply</button></noscript>
+    {% if sort != 'profit_desc' or filters.strategy != 'all' or filters.symbol != 'all' or filters.proven != 'all' or filters.style != 'all' or filters.q or marked %}
+    <a class="muted small" href="/bots?scope={{ scope }}{{ '&user=' ~ fleet_uid if not is_own_fleet }}"
+       style="align-self:center">reset</a>
+    {% endif %}
+  </form>
+
+  {% if not rows and total_rows %}
+    <p class="muted">No bots match
+      {%- if filters.q %} “{{ filters.q }}”{% if filters.strategy != 'all' or filters.symbol != 'all' or filters.proven != 'all' or filters.style != 'all' %} and these filters{% endif %}
+      {%- else %} these filters{% endif %}.
+      <a href="/bots?scope={{ scope }}{{ '&user=' ~ fleet_uid if not is_own_fleet }}">Clear them</a>.</p>
+  {% elif not rows %}
+    <p class="muted">No bots yet — the daily maintenance run seeds the fleet at 09:15 ET, or hit
+      <em>Run cycle now</em> / spawn some above.</p>
+  {% else %}
+  <div class="botgrid">
+    {% for r in rows %}
+    {# one row, two readings of it: the booked ledger, or that marked to today's
+       prices. Only the headline value, its P&L and the curve change — every
+       other number on the card is view-independent, as is the scoreboard. #}
+    {% set value = (r.equity if marked else r.balance) %}
+    {% set pl = value - (r.start_balance or 0) %}
+    {% set pl_pct = (pl / r.start_balance * 100.0) if r.start_balance else None %}
+    {% set up = pl > 0 %}
+    {% set tone = 'pos' if up else ('neg' if pl < 0 else '') %}
+    <a class="botcard {{ 'up' if up else ('down' if pl < 0 else '') }}" href="/bots/{{ r.id }}">
+      <div class="bc-top">
+        <span class="bc-name">{{ r.name }}
+          <span class="muted small">{{ 'swing' if r.style == 'swing' else '0DTE' }}</span></span>
+        <span class="pill {{ 'recommended' if r.status == 'active' else ('avoid' if r.status == 'failing' else 'passed') }}">{{ r.status }}</span>
+      </div>
+      <div class="bc-label">Account value <span class="muted small">{{ 'marked' if marked else 'realized' }}</span></div>
+      {# only worth splitting the total when there IS something unrealized in it —
+         a flat bot would otherwise print the same figure twice #}
+      <div class="bc-account {{ tone }}">{{ value | money }}{% if marked and r.unrealized_pl %}
+        <span class="muted small" title="the booked ledger inside that total — the rest is {{ r.open_count }} open position{{ '' if r.open_count == 1 else 's' }} at {{ 'its' if r.open_count == 1 else 'their' }} latest mark">({{ r.balance | money }} realized)</span>{% endif %}</div>
+      <div class="bc-pl {{ tone }}">{{ pl | money }} · {{ pl_pct | pct if pl_pct is not none else '—' }}</div>
+      <svg class="bc-spark" viewBox="0 0 240 44" preserveAspectRatio="none">
+        <polyline points="{{ r.spark_marked if marked else r.spark }}" fill="none"
+                  stroke="{{ 'var(--green)' if up else ('var(--red)' if pl < 0 else 'var(--grey)') }}"
+                  stroke-width="2"/>
+      </svg>
+      <div class="bc-grid">
+        <div><span class="bc-k">Drawdown</span>
+          <span class="bc-sv {{ 'neg' if r.drawdown_pct >= limits.drawdown * 0.6 }}">{{ r.drawdown_pct | pct(0) }}</span></div>
+        <div><span class="bc-k">Win rate</span><span class="bc-sv">{{ r.win_rate | pct(0) }}</span></div>
+        <div><span class="bc-k">Fitness</span>
+          <span class="bc-sv {{ 'pos' if r.fitness and r.fitness > 0 else ('neg' if r.fitness and r.fitness < 0 else '') }}"
+                title="t-stat of per-trade return on premium, minus the buy-and-hold baseline's return the same day, shrunk toward the fleet average">{{ r.fitness | num(2) }}</span></div>
+        <div><span class="bc-k">Robust</span>
+          <span class="bc-sv {{ 'pos' if r.robust_fitness and r.robust_fitness > 0 else ('neg' if r.robust_fitness and r.robust_fitness < 0 else '') }}"
+                title="the worst of lifetime, recent, and marked-to-market fitness — what breeding actually ranks bots by">{{ r.robust_fitness | num(2) }}</span></div>
+        <div><span class="bc-k">Recent</span>
+          <span class="bc-sv {{ 'pos' if r.fitness_recent and r.fitness_recent > 0 else ('neg' if r.fitness_recent and r.fitness_recent < 0 else '') }}"
+                title="fitness from just the last {{ r.holdout_days }} trading days">{{ (r.fitness_recent | num(2)) if r.fitness_recent is not none else '—' }}</span></div>
+        <div><span class="bc-k">Trades / days</span><span class="bc-sv">{{ r.closed_count }} / {{ r.active_days or 0 }}</span></div>
+      </div>
+      <div class="bc-foot muted small">{{ r.genome_desc }}</div>
+      <div class="bc-foot muted small">gen {{ r.generation or 0 }} · {{ r.origin or 'manual' }}
+        {% if r.proven %}· <span class="pos">proven</span>{% elif r.promising %}· <span class="pos" title="profitable, fitness {{ r.robust_fitness | num(2) }} ≥ {{ r.promising_threshold }}; below the {{ r.proven_threshold }} proven bar">promising</span>{% elif r.eligible %}· <span title="sample gates met, fitness {{ r.robust_fitness | num(2) }} below the {{ r.proven_threshold }} bar">eligible, below bar</span>{% else %}· <span title="needs {{ limits.elig_trades }} trades across {{ limits.elig_days }} sessions in {{ limits.elig_regimes }}+ regimes (has {{ r.closed_count }}/{{ r.active_days }}/{{ r.regime_count }})">unproven</span>{% endif %}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% set sort_label = (sort_options | selectattr(0, 'eq', sort) | map(attribute=1) | first) or 'P&L' %}
+  <p class="muted small">Sorted by {{ sort_label | lower }}{{ ', counted with open positions'
+    if marked and sort in ('profit_desc', 'profit_asc') }}.
+    Sparkline = {% if marked %}the realized equity curve with today's mark-to-market as a final leg; open
+    positions have only a latest mark, not a per-day history to redraw{% else %}realized equity curve{% endif %}.
+    Click a card for full stats, genome and trade log.</p>
+  {% endif %}
+</div>
+{% endblock %}

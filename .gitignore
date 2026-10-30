@@ -1,0 +1,22 @@
+# virtualenvs
+venv/
+.venv/
+env/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# runtime state (never commit — holds the password hash + session key)
+data/
+week_cache.json
+week_cache_cron.log
+
+# os / editor
+.DS_Store
+*.swp
+
+.env
+*.env

@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Managers · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="rowspread">
+    <h1>Managers</h1>
+    <a href="/bots/custom" class="muted small">← Custom Bots</a>
+  </div>
+  <p class="muted small">
+    A manager keeps several custom bots on one account, every one with the <strong>same amount of money</strong> and
+    the same per-trade limit. It picks the best fleet bots, replaces one that starts failing or is clearly beaten, and
+    never puts two near-identical bots in the account — so one bad bot can only lose its own slot.
+  </p>
+  {% if err %}<div class="banner error">{{ err }}</div>{% endif %}
+  {% if ok %}<div class="banner ok">{{ ok }}</div>{% endif %}
+
+  {% for c in cards %}
+  <div class="stat" style="margin-top:10px">
+    <div class="rowspread">
+      <div>
+        <a href="/bots/managers/{{ c.m.id }}"><strong>{{ c.m.name }}</strong></a>
+        <span class="pill {{ 'avoid' if c.account and c.account.live else 'passed' }}">{{ 'LIVE' if c.account and c.account.live else 'paper' }}</span>
+        <span class="pill passed">{{ c.m.mode | replace('_', ' ') }}</span>
+        {% if not c.m.enabled %}<span class="pill open">paused</span>{% endif %}
+        {% if c.pending %}<span class="pill consider">{{ c.pending }} to approve</span>{% endif %}
+      </div>
+      <div class="{{ 'pos' if c.pl > 0 else 'neg' if c.pl < 0 }}">{{ c.pl | money }}</div>
+    </div>
+    <div class="muted small">
+      {{ c.account.name if c.account else 'account removed' }} · {{ c.filled }}/{{ c.m.slots }} slots filled ·
+      {{ c.size | money }} per bot · max {{ c.cap | money }} ({{ c.m.position_pct | num(0) }}%) per trade
+    </div>
+  </div>
+  {% else %}
+  <p class="muted">No managers yet.</p>
+  {% endfor %}
+
+  <details class="settings-panel" style="margin-top:14px" {% if not cards %}open{% endif %}>
+    <summary><strong>➕ New manager</strong></summary>
+    <form method="post" action="/bots/managers/create" class="grid" style="margin-top:10px" id="mgr-form">
+      <label>Name <input type="text" name="name" placeholder="e.g. Steady 4" required></label>
+      <label>Account
+        <select name="account_id" id="f-account" required>
+          {% for a in accounts %}
+          <option value="{{ a.id }}" data-live="{{ 1 if a.live else 0 }}" data-name="{{ a.name }}">
+            {{ a.name }} — {{ 'LIVE (real money)' if a.live else 'paper' }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Number of bots (slots)
+        <input type="number" name="slots" id="f-slots" min="1" max="{{ max_slots }}" value="4" required></label>
+      <label>Total money for the account ($)
+        <input type="number" name="total_budget" id="f-budget" min="1" step="1" value="1000" required></label>
+      <label>Max % of a bot's money per trade
+        <input type="number" name="position_pct" id="f-pct" min="1" max="100" step="1" value="25" required></label>
+      <label>Mode
+        <select name="mode">
+          <option value="dry_run">dry run — only tell me what it would do</option>
+          <option value="propose">propose — I approve each change</option>
+          <option value="auto">auto — apply changes itself</option>
+        </select>
+      </label>
+      <label id="f-confirm-wrap" style="display:none">Type the live account's exact name to confirm
+        <input type="text" name="confirm_name" id="f-confirm" autocomplete="off"></label>
+    </form>
+    <div id="f-hint" class="banner warn" style="margin-top:10px">Fill in the numbers to see what the fleet can supply.</div>
+    <details style="margin-top:8px"><summary class="muted small">Advanced rules (defaults are sensible)</summary>
+      <div class="grid" style="margin-top:8px">
+        {% for k, v in defaults.items() %}
+        <label class="small">{{ k | replace('_', ' ') }}
+          {% if v is sameas true or v is sameas false %}
+          <select name="rule_{{ k }}" form="mgr-form"><option value="1" {{ 'selected' if v }}>yes</option><option value="0" {{ 'selected' if not v }}>no</option></select>
+          {% else %}<input type="number" step="any" name="rule_{{ k }}" form="mgr-form" value="{{ v }}">{% endif %}
+        </label>
+        {% endfor %}
+      </div>
+    </details>
+    <div style="margin-top:10px"><button type="submit" form="mgr-form">Create manager</button></div>
+    <p class="muted small">Capital pool left for custom bots: {{ pool_available | money }} of {{ pool_total | money }} —
+      managed bots draw from it (raise it on <a href="/bots/custom">Custom Bots</a> if needed).
+      New managers start in the mode you choose; a live account cannot use auto until it has run
+      {{ auto_days }} days in dry run or propose.</p>
+  </details>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var timer = null;
+  function money(v) { return '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits: 0}); }
+  function liveBox() {
+    var o = $('f-account').selectedOptions[0];
+    var live = o && o.dataset.live === '1';
+    $('f-confirm-wrap').style.display = live ? '' : 'none';
+    $('f-confirm').required = !!live;
+  }
+  function hint() {
+    var slots = +$('f-slots').value, budget = +$('f-budget').value, pct = +$('f-pct').value;
+    var box = $('f-hint');
+    if (!(slots >= 1 && budget > 0 && pct >= 1)) { return; }
+    fetch('/bots/managers/preview?slots=' + slots + '&total_budget=' + budget + '&position_pct=' + pct)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { box.textContent = d.error; box.className = 'banner error'; return; }
+        var t = 'Each bot gets ' + money(d.size) + ' and may put at most ' + money(d.per_trade_cap) + ' into one trade. ';
+        if (pct > 50) { t += 'That is a large share of a bot’s money for one trade. '; }
+        if (d.enough) {
+          t += 'The fleet can fill all ' + slots + ' slots today: ' + d.picks.map(function (p) { return p.name; }).join(', ') + '.';
+          box.className = 'banner ok';
+        } else {
+          t += d.n_candidates + ' fleet bot(s) qualify today' + (d.picks.length ? ' (' + d.picks.map(function (p) { return p.name; }).join(', ') + ')' : '') +
+               ' — not enough for ' + slots + ' slots. ';
+          if (d.min_slot_lowest) { t += 'Bots with a real record need at least ' + money(d.min_slot_lowest) + ' per bot at ' + pct + '% per trade (typically ' + money(d.min_slot_median) + '): raise the budget or the per-trade %.'; }
+          box.className = 'banner warn';
+        }
+        box.textContent = t;
+      }).catch(function () {});
+  }
+  function later() { clearTimeout(timer); timer = setTimeout(hint, 350); }
+  ['f-slots', 'f-budget', 'f-pct'].forEach(function (id) { $(id) && $(id).addEventListener('input', later); });
+  if ($('f-account')) { $('f-account').addEventListener('change', liveBox); liveBox(); later(); }
+})();
+</script>
+{% endblock %}

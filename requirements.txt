@@ -1,0 +1,5 @@
+FreeSimpleGUI==5.1.1
+numpy==2.1
+scipy==1.15.1
+yfinance==1.7.0
+requests>=2.32

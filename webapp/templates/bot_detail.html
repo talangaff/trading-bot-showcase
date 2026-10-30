@@ -1,0 +1,523 @@
+{% extends "base.html" %}
+{% block title %}{{ bot.name }} · Bot Fleet{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="rowspread">
+    <div>
+      {# a fleet bot reached from another account's fleet goes back to THAT fleet.
+         /bots/custom is strictly the viewer's own page — it ignores ?user= — so the
+         custom branch deliberately stays unscoped. #}
+      <a class="back" href="{{ '/bots/custom' if is_custom else '/bots' ~ back_qs }}">← {{ 'Custom Bots' if is_custom else 'Bot Fleet' }}</a>
+      <h1>{{ bot.name }}
+        <span class="pill {{ 'recommended' if bot.status == 'active' else 'avoid' }}">{{ bot.status }}</span>
+        {% if is_custom %}
+        <span class="pill">custom</span>
+        <span class="pill {{ 'recommended' if bot.enabled else 'avoid' }}">{{ 'enabled' if bot.enabled else 'disabled' }}</span>
+        {% endif %}
+      </h1>
+      <div class="muted small">
+        {{ bot.symbol or 'no symbol' }} ·
+        {{ bot.strategy or 'no strategy set' }} ·
+        started {{ bot.start_balance | money }}
+        {% if bot.flagged_at %} · flagged {{ bot.flagged_at | localstamp }}{% endif %}
+      </div>
+    </div>
+    <div class="row" style="gap:8px">
+      {% if not can_edit %}
+      <span class="pill passed" title="this bot belongs to another account">read-only</span>
+      {% elif is_custom %}
+      <form method="post" action="/bots/{{ bot.id }}/toggle">
+        <button type="submit" class="ghost">{{ 'Disable' if bot.enabled else 'Enable' }}</button>
+      </form>
+      {% else %}
+      <form method="post" action="/bots/{{ bot.id }}/archive"
+            onsubmit="return confirm('Save a permanent snapshot of this bot?')">
+        <button type="submit" class="ghost">{{ 'Archived ✓' if bot.archived else 'Save to archive' }}</button>
+      </form>
+      <form method="post" action="/bots/{{ bot.id }}/status">
+        {% if bot.status == 'active' %}
+          <input type="hidden" name="status" value="retired">
+          <button type="submit" class="ghost">Retire</button>
+        {% else %}
+          <input type="hidden" name="status" value="active">
+          <button type="submit" class="ghost">Reactivate</button>
+        {% endif %}
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% if err %}<div class="banner error">{{ err }}</div>{% endif %}
+  {% if bot.status == 'failing' %}
+  <div class="banner warn">Disqualified — realized drawdown hit the {{ st.drawdown_limit | pct(0) }} limit.
+    Positions were force-closed.
+    {% if is_custom %}Re-enable and/or loosen its guardrails below, then set it back to active whenever you're ready — it is never auto-retired.
+    {% else %}The engine replaces it with a mutated copy of the best bot.{% endif %}</div>
+  {% elif bot.status == 'retired' %}
+  <div class="banner warn">Retired — no longer trading.</div>
+  {% elif is_custom and not bot.enabled %}
+  <div class="banner warn">Disabled — holding any open positions but not opening new ones. Re-enable above to resume live trading.</div>
+  {% endif %}
+  {% if is_custom and owner_user and is_admin %}
+  <p class="muted small">Owned by <strong>{{ owner_user.username }}</strong>{% if owner_user.id != user.id %} — you are viewing it as an admin{% endif %}.</p>
+  {% endif %}
+  {% if is_custom and not alpaca_connected %}
+  <div class="banner warn">
+    {% if not bot_account %}Not on an account — pick one below. A bot with no account does not trade.
+    {% elif bot_account.live and not live_enabled %}Its account is <strong>live</strong> and live trading is switched off, so it is not trading.
+    {% else %}Its account has no usable keys.{% endif %}
+  </div>
+  {% elif is_custom %}
+  {% elif exec_mode == 'broker' and not alpaca_connected %}
+  <div class="banner warn">No Alpaca keys saved — this bot places real orders on {{ exec_account }} paper account and
+    can't trade until keys are added on the <a href="{{ '/bots/custom' if is_custom else '/bots' }}">{{ 'Custom Bots' if is_custom else 'Bot Fleet' }}</a> page.</div>
+  {% elif exec_mode == 'broker' %}
+  {% else %}
+  <p class="muted small">Simulated execution — this bot's fills are modeled (spread + commission); no orders are sent.</p>
+  {% endif %}
+</div>
+
+{% if is_custom and can_edit %}
+<div class="card">
+  <h2>Account</h2>
+  {% if not bot_accounts %}
+  <p class="muted small">You have no saved accounts yet — add a paper or live one on the <a href="/bots/custom">Custom Bots</a> page.</p>
+  {% else %}
+  <form method="post" action="/bots/{{ bot.id }}/account" class="grid">
+    <label>Trade on
+      <select name="account_id">
+        <option value="">— none (bot does not trade) —</option>
+        {% for a in bot_accounts %}
+        <option value="{{ a.id }}" {{ 'selected' if bot_account and bot_account.id == a.id }}>{{ a.name }} ({{ 'LIVE' if a.live else 'paper' }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Live accounts: type the account name to confirm
+      <input type="text" name="confirm_name" autocomplete="off" placeholder="only needed for a live account">
+    </label>
+    <div style="align-self:end"><button type="submit">Move bot to this account</button></div>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Guardrail overrides</h2>
+  <form method="post" action="/bots/{{ bot.id }}/guardrails" class="grid">
+    <label>Max drawdown %
+      <input type="number" step="0.5" name="max_drawdown_pct"
+             value="{{ guardrail_overrides.max_drawdown_pct if guardrail_overrides.max_drawdown_pct is not none else '' }}"
+             placeholder="{{ fleet_guardrails.max_drawdown_pct }}">
+      <span class="fhint">0–100%</span>
+    </label>
+    <label>Max position size %
+      <input type="number" step="0.5" name="position_pct_limit"
+             value="{{ guardrail_overrides.position_pct_limit if guardrail_overrides.position_pct_limit is not none else '' }}"
+             placeholder="{{ fleet_guardrails.position_pct_limit }}">
+      <span class="fhint">0–100% · most it may have open at once, as a share of this bot's balance</span>
+    </label>
+    <label>Min contracts
+      <input type="number" step="1" name="min_contracts"
+             value="{{ guardrail_overrides.min_contracts if guardrail_overrides.min_contracts is not none else '' }}"
+             placeholder="{{ fleet_guardrails.min_contracts }}">
+      <span class="fhint">1 or more</span>
+    </label>
+    <label>Max contracts per trade
+      <input type="number" step="1" name="max_contracts"
+             value="{{ guardrail_overrides.max_contracts if guardrail_overrides.max_contracts is not none else '' }}"
+             placeholder="{{ fleet_guardrails.max_contracts }}">
+      <span class="fhint">1 or more</span>
+    </label>
+    <label style="grid-column:1/-1; display:block">
+      <input type="checkbox" name="min_size_over_risk" value="1" {{ 'checked' if guardrail_overrides.min_size_over_risk }}
+             style="width:auto; margin-right:6px">
+      Buy the minimum size even if it costs more than the per-trade budget
+      <span class="fhint" style="display:block; margin-top:4px">
+        Each entry normally may spend only {{ risk_pct }}% of this bot's balance
+        (≈ ${{ '{:,.0f}'.format(bot_balance * risk_pct / 100) }} now). That is the bot's own
+        <em>risk_pct</em> setting, separate from the limits above. If the contract it picks costs more,
+        it skips the trade. Tick this to buy the minimum number of contracts anyway, as long as the cost
+        stays within Max position size. It never buys more than the minimum this way.
+      </span>
+    </label>
+    <div style="align-self:end; display:flex; gap:8px">
+      <button type="submit">Save overrides</button>
+    </div>
+  </form>
+  {% if guardrail_overrides %}
+  <form method="post" action="/bots/{{ bot.id }}/guardrails" style="margin-top:8px">
+    <input type="hidden" name="clear" value="1">
+    <button type="submit" class="ghost small">Clear all overrides (inherit the fleet guardrails)</button>
+  </form>
+  {% endif %}
+  <div id="minbal" class="muted small" style="margin-top:10px"
+       data-unit="{{ entry_hist.max }}" data-n="{{ entry_hist.n }}" data-balance="{{ bot_balance }}"
+       data-pct="{{ position_limit }}" data-min="{{ min_contracts }}"
+       data-pct-lo="{{ guardrail_bounds.position_pct_limit[0] }}" data-pct-hi="{{ guardrail_bounds.position_pct_limit[1] }}"
+       data-equity="{{ acct_equity if acct_equity is not none and bot_account else '' }}">
+    {% if entry_hist.n %}
+    <strong>Minimum balance for these rules: <span id="minbal-val">{{ '${:,.2f}'.format(min_balance) if min_balance is not none else 'none — position size is 0%, it can never buy' }}</span></strong>
+    — from {{ entry_hist.n }} past entr{{ 'y' if entry_hist.n == 1 else 'ies' }}{% if entry_hist.n != entry_hist.n_own %} ({{ entry_hist.n_own }} as this bot, {{ entry_hist.n - entry_hist.n_own }} from the fleet bot(s) it was cloned from){% endif %}; the priciest cost
+    ${{ '{:,.2f}'.format(entry_hist.max) }} per contract. Balance now: ${{ '{:,.2f}'.format(bot_balance) }}
+    <span id="minbal-status"></span>
+    {% if acct_equity is not none and bot_account %}
+    <br>Account <strong>{{ bot_account.name }}</strong> holds ${{ '{:,.2f}'.format(acct_equity) }}
+    — <span id="minbal-acct">{{ 'enough' if min_balance is not none and acct_equity >= min_balance else 'NOT enough' }}</span> for this minimum.
+    {% endif %}
+    {% else %}
+    No past entries yet, so there is nothing to base a minimum balance on.
+    {% endif %}
+  </div>
+  <script>
+  (function () {
+    var box = document.getElementById('minbal');
+    if (!box || !+box.dataset.n) return;
+    var f = box.closest('.card').querySelector('form.grid');
+    function val(name, dflt) { var v = parseFloat(f[name].value); return isNaN(v) ? dflt : v; }
+    function update() {
+      var pct = val('position_pct_limit', +box.dataset.pct);
+      pct = Math.max(+box.dataset.pctLo, Math.min(+box.dataset.pctHi, pct));   // saved values are clamped to the bounds
+      var mn = Math.max(1, val('min_contracts', +box.dataset.min));
+      if (pct <= 0) return;
+      var need = +box.dataset.unit * mn / (pct / 100), bal = +box.dataset.balance;
+      document.getElementById('minbal-val').textContent = '$' + need.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      var eq = box.dataset.equity, ae = document.getElementById('minbal-acct');
+      if (ae && eq !== '') ae.textContent = (+eq >= need) ? 'enough' : 'NOT enough';
+      document.getElementById('minbal-status').textContent = bal >= need ? '✓ enough' : '✗ short by $' + (need - bal).toLocaleString(undefined, {maximumFractionDigits: 2});
+    }
+    f.addEventListener('input', update); update();
+  })();
+  </script>
+  <p class="muted small" style="margin-top:6px">Currently trading under: drawdown {{ st.drawdown_limit | pct(0) }} ·
+    position ≤ {{ position_limit | pct(0) }} · {{ min_contracts }}–{{ max_contracts }} contracts/trade.</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Skills (genome)</h2>
+  <div class="muted small">{{ genome_desc }}</div>
+  {% if live.ready %}
+  <p class="muted small">
+    Live check: {% if live.direction %}<b class="pos">{{ live.direction }}</b> signal, strength {{ live.strength | num(2) }}
+    {% else %}<span class="neg">no entry signal right now</span>{% endif %} ·
+    green = requirement currently met, red = not met.
+  </p>
+  {% else %}
+  <p class="muted small">Live check unavailable (market data not ready) — genome shown without live status.</p>
+  {% endif %}
+  <div class="genebox">
+    {% for k, v in genome.items() %}<div><b>{{ k }}</b>
+      <span{% if k in gene_status %} class="{{ 'pos' if gene_status[k] else 'neg' }}" title="{% for c in live.checks %}{% if c.gene == k %}{{ c.note }}{% endif %}{% endfor %}"{% endif %}>{{ v }}</span></div>{% endfor %}
+  </div>
+  <p class="muted small" style="margin-top:8px">
+    Generation {{ bot.generation or 0 }} · origin {{ bot.origin or 'manual' }}
+    {% if parent %} · child of {% if parent_visible %}<a href="/bots/{{ parent.id }}">{{ parent.name }}</a>{% else %}{{ parent.name }}{% endif %}{% endif %}
+    · peak P&amp;L {{ st.peak_pl_pct | pct(0) }}
+    {% if st.peak_pl_pct >= 50 %}<span class="pill recommended">archive-worthy</span>{% endif %}
+  </p>
+  <p class="muted small">
+    Breeding fitness <b title="t-stat of baseline-adjusted per-trade return on premium, shrunk toward the fleet mean">{{ st.fitness | num(2) }}</b>
+    (robust <b>{{ st.robust_fitness | num(2) }}</b>, recent
+    {{ (st.fitness_recent | num(2)) if st.fitness_recent is not none else '—' }},
+    marked {{ st.fitness_marked | num(2) }})
+    · avg trade {{ ((st.avg_trade_return * 100) | num(1)) ~ '% of premium vs baseline' if st.avg_trade_return is not none else '—' }}
+    · profit factor {{ st.profit_factor | num(2) }}
+    · {{ st.closed_count }} trades across {{ st.active_days or 0 }} day(s) ·
+    regimes {{ st.regimes | join(', ') if st.regimes else '—' }} ·
+    {% if st.proven %}<span class="pill recommended wrap">proven — can breed (fitness {{ st.robust_fitness | num(2) }} ≥ bar {{ st.proven_threshold }})</span>
+    {% elif st.promising %}<span class="pill consider wrap">promising — can breed (fitness {{ st.robust_fitness | num(2) }} ≥ {{ st.promising_threshold }}, below the {{ st.proven_threshold }} proven bar)</span>
+    {% elif st.eligible %}<span class="pill consider wrap">eligible — fitness {{ st.robust_fitness | num(2) }} below the {{ st.proven_threshold }} bar, or not yet profitable</span>
+    {% else %}<span class="pill passed wrap">unproven — needs {{ st.closed_count }}/{{ elig_trades }} trades, {{ st.active_days or 0 }}/{{ elig_days }} sessions, {{ st.regime_count }}/{{ elig_regimes }} regimes</span>{% endif %}
+  </p>
+</div>
+
+{% if is_custom and can_edit %}
+<div class="card">
+  <h2>Edit rules (genome)</h2>
+  <p class="muted small">Hand-tune any of this bot's strategy parameters. Leave a field blank to keep its
+    current value.</p>
+  <form method="post" action="/bots/{{ bot.id }}/genome" class="grid">
+    <label>Strategy
+      <select name="strategy">
+        {% for s in gene_choices.strategy %}<option value="{{ s }}" {{ 'selected' if genome.strategy == s }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Symbol
+      <select name="symbol">
+        {% for s in gene_choices.symbol %}<option value="{{ s }}" {{ 'selected' if genome.symbol == s }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Order preference
+      <select name="order_pref">
+        {% for s in gene_choices.order_pref %}<option value="{{ s }}" {{ 'selected' if genome.order_pref == s }}>{{ s.replace('_',' ') }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Strike style
+      <select name="strike_style">
+        {% for s in gene_choices.strike_style %}<option value="{{ s }}" {{ 'selected' if genome.strike_style == s }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Average-in when
+      <select name="scale_in_when">
+        {% for s in gene_choices.scale_in_when %}<option value="{{ s }}" {{ 'selected' if genome.scale_in_when == s }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Style
+      <select name="style">
+        {% for s in gene_choices.style %}<option value="{{ s }}" {{ 'selected' if genome.style == s }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Structure
+      <select name="structure">
+        {% for s in gene_choices.structure %}<option value="{{ s }}" {{ 'selected' if genome.structure == s }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    {% for k, bnd in gene_bounds.items() %}
+    <label>{{ k }}
+      <input type="number" step="{{ '1' if k in int_genes else '0.01' }}" name="{{ k }}"
+             value="{{ genome[k] }}" min="{{ bnd[0] }}" max="{{ bnd[1] }}">
+      <span class="fhint">range {{ bnd[0] }}–{{ bnd[1] }}</span>
+    </label>
+    {% endfor %}
+    <div style="align-self:end"><button type="submit">Save rules</button></div>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Realized equity curve</h2>
+  <div id="eqchart" style="position:relative" data-start="{{ chart.start_balance }}"
+       data-w="{{ chart.width }}" data-h="{{ chart.height }}" data-pts="{{ chart.hover | tojson | forceescape }}">
+  <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" width="100%" preserveAspectRatio="none"
+       style="display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px">
+    <line x1="0" y1="{{ chart.start_y }}" x2="{{ chart.width }}" y2="{{ chart.start_y }}"
+          stroke="var(--grey)" stroke-width="1" stroke-dasharray="4 4"/>
+    <line x1="0" y1="{{ chart.dq_y }}" x2="{{ chart.width }}" y2="{{ chart.dq_y }}"
+          stroke="var(--red)" stroke-width="1" stroke-dasharray="6 3"/>
+    <polyline points="{{ chart.line }}" fill="none"
+              stroke="{{ 'var(--green)' if chart.up else 'var(--red)' }}" stroke-width="2"/>
+  </svg>
+  <div class="eq-cursor" hidden style="position:absolute;top:0;bottom:0;width:1px;background:var(--grey);pointer-events:none"></div>
+  <div class="eq-dot" hidden style="position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;background:var(--text);border:2px solid var(--bg);pointer-events:none"></div>
+  <div class="eq-tip" hidden style="position:absolute;top:6px;z-index:5;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12px;line-height:1.45;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.25)"></div>
+  </div>
+  <script>
+  (function () {
+    var box = document.getElementById('eqchart');
+    if (!box) return;
+    var pts = JSON.parse(box.dataset.pts || '[]'), start = +box.dataset.start, W = +box.dataset.w, H = +box.dataset.h;
+    if (!pts.length) return;
+    var cur = box.querySelector('.eq-cursor'), dot = box.querySelector('.eq-dot'), tip = box.querySelector('.eq-tip');
+    var money = function (v) { return '$' + v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}); };
+    var signed = function (v) { return (v >= 0 ? '+' : '−') + money(Math.abs(v)); };
+    var pc = function (v) { return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2) + '%'; };
+    function when(ts) {
+      if (!ts) return 'Start';
+      var d = new Date(ts); if (isNaN(d)) d = new Date(String(ts).replace(' ', 'T'));
+      return isNaN(d) ? String(ts) : d.toLocaleString(undefined, {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'});
+    }
+    function show(e) {
+      var r = box.getBoundingClientRect(), fx = (e.clientX - r.left) / r.width * W, best = 0, bd = 1e9;
+      for (var i = 0; i < pts.length; i++) { var d = Math.abs(pts[i].x - fx); if (d < bd) { bd = d; best = i; } }
+      var p = pts[best], peak = 0;
+      for (var j = 0; j <= best; j++) peak = Math.max(peak, pts[j].bal);
+      var dd = peak > 0 ? (p.bal - peak) / peak * 100 : 0;
+      var lx = p.x / W * r.width;
+      cur.style.left = lx + 'px'; dot.style.left = lx + 'px'; dot.style.top = (p.y / H * r.height) + 'px';
+      tip.innerHTML = '<strong>' + when(p.ts) + '</strong><br>Balance ' + money(p.bal) + '<br>vs start ' + signed(p.bal - start) +
+        ' (' + pc((p.bal - start) / start * 100) + ')<br>From peak ' + pc(dd) + ' &middot; trade ' + best + ' of ' + (pts.length - 1);
+      cur.hidden = dot.hidden = tip.hidden = false;
+      var tw = tip.offsetWidth;
+      tip.style.left = (lx + 14 + tw > r.width ? lx - 14 - tw : lx + 14) + 'px';
+    }
+    box.addEventListener('mousemove', show);
+    box.addEventListener('touchmove', function (e) { if (e.touches[0]) show(e.touches[0]); }, {passive: true});
+    box.addEventListener('mouseleave', function () { cur.hidden = dot.hidden = tip.hidden = true; });
+  })();
+  </script>
+</div>
+
+<div class="card">
+  <h2>Stats</h2>
+  <div class="agg">
+    <div class="stat">
+      <div class="stat-label">Balance</div>
+      <div class="stat-value {{ 'pos' if st.pl_dollar > 0 else ('neg' if st.pl_dollar < 0 else '') }}">{{ st.balance | money }}</div>
+      <div class="muted small">{{ st.pl_dollar | money }} ({{ st.pl_pct | pct }})</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Current drawdown <span class="muted">(limit {{ st.drawdown_limit | pct(0) }})</span></div>
+      <div class="stat-value {{ 'neg' if st.drawdown_pct >= st.drawdown_limit * 0.6 }}">{{ st.drawdown_pct | pct }}</div>
+      <div class="bar"><div class="fill" style="width: {{ (100 * st.drawdown_pct / st.drawdown_limit) if st.drawdown_limit else 0 }}%; background: var(--red)"></div></div>
+      <div class="muted small">{{ st.dq_headroom_pct | pct }} of headroom · peak {{ st.peak_balance | money }}
+        {% if st.open_count %}· marked equity {{ st.equity | money }} ({{ st.unrealized_pl | money }} open){% endif %}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Win rate</div>
+      <div class="stat-value">{{ st.win_rate | pct(0) }}</div>
+      <div class="muted small">{{ st.wins }}W / {{ st.losses }}L over {{ st.closed_count }} closed</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Avg win / avg loss</div>
+      <div class="stat-value">{{ st.avg_win | money }} <span class="muted">/</span> {{ st.avg_loss | money }}</div>
+      <div class="muted small">best {{ st.largest_win | money }} · worst {{ st.largest_loss | money }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Current streak</div>
+      <div class="stat-value {{ 'pos' if st.streak > 0 else ('neg' if st.streak < 0 else '') }}">
+        {% if st.streak > 0 %}{{ st.streak }}W{% elif st.streak < 0 %}{{ -st.streak }}L{% else %}—{% endif %}
+      </div>
+      <div class="muted small">max drawdown {{ st.max_drawdown_pct | pct }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Open exposure</div>
+      <div class="stat-value">{{ st.open_cost | money }}</div>
+      <div class="muted small">{{ st.open_count }} position(s) · {{ (100 * st.open_cost / st.balance) if st.balance else 0 }}% of balance</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Fill pricing</div>
+      <div class="stat-value">{{ fill_mix.live_pct | round(0) }}% live</div>
+      <div class="muted small">
+        {% for src, n in fill_mix.counts.items() %}{{ src }}: {{ n }}{{ ", " if not loop.last }}{% endfor %}
+        {% if not fill_mix.counts %}no fills yet{% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Open positions</h2>
+  {% if not st.open_positions %}
+    <p class="muted">Flat.</p>
+  {% else %}
+  <div class="tablewrap">
+  <table class="results">
+    <thead><tr><th>Contract</th><th>Contracts</th><th>Avg cost</th><th>Cost basis</th>
+      <th>Mark</th><th>Open P&amp;L</th><th>Open P&amp;L %</th></tr></thead>
+    <tbody>
+    {% for p in st.open_positions %}
+      <tr><td class="sym">{{ p.contract }}</td><td>{{ p.qty }}</td>
+        <td>{{ p.avg_price | num }}</td><td>{{ p.cost | money }}</td>
+        <td>{{ p.mark | num if p.mark is not none else '—' }}</td>
+        <td class="{{ 'pos' if p.pl and p.pl > 0 else ('neg' if p.pl and p.pl < 0 else '') }}">
+          {{ p.pl | money if p.pl is not none else '—' }}</td>
+        <td class="{{ 'pos' if p.pl and p.pl > 0 else ('neg' if p.pl and p.pl < 0 else '') }}">
+          {{ p.pl_pct | pct if p.pl_pct is not none else '—' }}</td></tr>
+    {% endfor %}
+    </tbody>
+    {% if st.unrealized_pl is not none %}
+    <tfoot><tr><th colspan="5">Total unrealized</th>
+      <th class="{{ 'pos' if st.unrealized_pl > 0 else ('neg' if st.unrealized_pl < 0 else '') }}"
+          colspan="2">{{ st.unrealized_pl | money }}</th></tr></tfoot>
+    {% endif %}
+  </table>
+  </div>
+  {% endif %}
+</div>
+
+{% if can_edit %}
+<div class="card">
+  <h2>Record a fill</h2>
+  {% if exec_mode == 'broker' %}
+  {% endif %}
+  <form method="post" action="/bots/{{ bot.id }}/trade" class="grid">
+    <label>Contract
+      <input type="text" name="contract" placeholder="SPY260903C00560000" required>
+    </label>
+    <label>Side
+      <select name="side">
+        <option value="buy_to_open">Buy to Open</option>
+        <option value="sell_to_close">Sell to Close</option>
+      </select>
+    </label>
+    <label>Order type
+      <select name="order_type">
+        {% for ot in order_types %}<option value="{{ ot }}">{{ ot.replace('_', ' ') }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Contracts
+      <input type="number" name="qty" step="1" min="1" placeholder="{{ min_contracts }}" required>
+    </label>
+    <label>Fill price (per contract)
+      <input type="number" name="price" step="0.01" min="0" required>
+    </label>
+    <label>Limit price <span class="fhint">for limit / stop-limit</span>
+      <input type="number" name="limit_price" step="0.01" min="0">
+    </label>
+    <label>Stop price <span class="fhint">for stop / stop-limit</span>
+      <input type="number" name="stop_price" step="0.01" min="0">
+    </label>
+    <label>Trail % <span class="fhint">for trailing stop</span>
+      <input type="number" name="trail_pct" step="0.1" min="0">
+    </label>
+    <label>Fees (total, optional)
+      <input type="number" name="fees" step="0.01" min="0" value="0">
+    </label>
+    <label>Note (optional)
+      <input type="text" name="note" placeholder="signal / reason">
+    </label>
+    <div style="align-self:end"><button type="submit">Record</button></div>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Trade log</h2>
+  {% if not log %}
+    <p class="muted">No fills yet.</p>
+  {% else %}
+  <div class="tablewrap">
+  <table class="results">
+    <thead><tr>
+      <th>When</th><th>Contract</th><th>Side</th><th>Order</th><th>Qty</th><th>Price</th><th>Fees</th>
+      <th>Realized P&amp;L</th><th>Note</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for t in log %}
+      <tr>
+        <td class="small">{{ t.ts | localstamp }}</td>
+        <td class="sym">{{ t.contract }}</td>
+        <td><span class="pill {{ 'recommended' if t.side == 'buy_to_open' else 'passed' }}">
+          {{ 'BTO' if t.side == 'buy_to_open' else 'STC' }}</span>
+          {% if t.fill_source == 'broker' %}<span class="pill recommended" title="real Alpaca fill">live</span>{% elif t.forced %}<span class="pill avoid" title="forced">F</span>{% endif %}</td>
+        <td class="small">{{ (t.order_type or 'market').replace('_', ' ') }}{%
+          if t.limit_price %} @ {{ t.limit_price | num }}{% endif %}{%
+          if t.stop_price %} stop {{ t.stop_price | num }}{% endif %}{%
+          if t.trail_pct %} trail {{ t.trail_pct | num(1) }}%{% endif %}</td>
+        <td>{{ t.qty }}</td>
+        <td>{{ t.price | num }}</td>
+        <td>{{ t.fees | money }}</td>
+        <td class="{{ 'pos' if t.pl and t.pl > 0 else ('neg' if t.pl and t.pl < 0 else '') }}">
+          {{ t.pl | money if t.pl is not none else '—' }}</td>
+        <td class="small">{{ t.note or '' }}</td>
+        <td>
+          {% if can_edit %}
+          <form method="post" action="/bots/{{ bot.id }}/trade/{{ t.id }}/delete"
+                onsubmit="return confirm('Delete this fill? Later fills will re-match.')">
+            <button type="submit" class="ghost small">del</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+
+{% if can_edit %}
+<div class="card">
+  <h2>Edit bot</h2>
+  <form method="post" action="/bots/{{ bot.id }}/edit" class="grid">
+    <label>Name<input type="text" name="name" value="{{ bot.name }}" required></label>
+    <label>Symbol<input type="text" name="symbol" value="{{ bot.symbol or '' }}"></label>
+    <label>Strategy<input type="text" name="strategy" value="{{ bot.strategy or '' }}"></label>
+    <label>Risk per trade %<input type="number" step="0.1" name="risk_pct" value="{{ bot.risk_pct or '' }}"></label>
+    <div style="align-self:end"><button type="submit" class="ghost">Save</button></div>
+  </form>
+  <form method="post" action="/bots/{{ bot.id }}/delete" style="margin-top:12px"
+        onsubmit="return confirm('Delete {{ bot.name }} and its entire ledger?')">
+    <button type="submit" class="ghost">Delete bot</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

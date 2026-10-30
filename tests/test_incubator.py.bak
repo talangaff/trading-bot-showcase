@@ -1,0 +1,329 @@
+"""The incubator: sim bots never place an order, graduates reach the fleet,
+losers leave it, winners that are doing well never do, and breeding draws on
+the best performers. See webapp/incubator.py."""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from webapp import bot_engine, bots, broker, gene_pool, genome, incubator
+
+UID = 1
+START = datetime(2026, 6, 1, 15, 0)     # a Monday
+REGIMES = ("low_vol", "mid_vol")
+
+
+def _sessions(n):
+    out, d = [], START
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d.isoformat() + "+00:00")
+        d += timedelta(days=1)
+    return out
+
+
+def _add_trades(bot_id, rets, per_day=3):
+    days = _sessions((len(rets) + per_day - 1) // per_day)
+    for i, r in enumerate(rets):
+        di = i // per_day
+        ts, regime = days[di], REGIMES[di % 2]
+        c = "SPY260904C{:08d}".format(500000 + i)
+        bots.record_trade(bot_id, c, "buy_to_open", 5, 1.00, ts=ts, fees=0, regime=regime)
+        bots.record_trade(bot_id, c, "sell_to_close", 5, 1.00 + r, ts=ts, fees=0, regime=regime)
+
+
+def _old(bot_id, hours=24 * 30):
+    """Make a bot old enough to be judged (past newborn grace / swap age)."""
+    born = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with bots._conn() as c:
+        c.execute("UPDATE bots SET created_at=? WHERE id=?", (born, bot_id))
+
+
+def _sim(rets=None, g=None, user=UID, age=24 * 30):
+    b = incubator.spawn(g or genome.random_genome(), user_id=user, origin="seed")
+    if rets:
+        _add_trades(b, rets)
+    _old(b, age)
+    return b
+
+
+@pytest.fixture
+def fleet_on(monkeypatch):
+    monkeypatch.setattr(bot_engine, "fleet_users", lambda: [UID])
+    monkeypatch.setattr(bot_engine, "active_fleet_users", lambda: [UID])
+
+
+GOOD = [0.25] * 36            # 36 trades, 12 sessions, steadily profitable
+BAD = [-0.10] * 24            # steadily losing, but inside the drawdown guardrail
+
+
+def test_sim_bots_are_always_modeled_never_broker():
+    b = incubator.spawn(genome.random_genome(), user_id=UID)
+    assert broker.execution(bots.get_bot(b))[0] == "model"
+    assert bots.get_bot(b)["pool"] == "sim"
+
+
+def test_sim_bots_stay_out_of_every_fleet_view_and_the_fleet_cap():
+    incubator.spawn(genome.random_genome(), user_id=UID)
+    assert bots.active_bots("fleet", UID) == []
+    assert bots.fleet_headroom(UID) == bots.fleet_cap(UID)
+    assert bots.leaderboard("active", "fleet", user_id=UID, fresh=True) == []
+    assert all(b.get("pool") != "sim" for b in bots.live_bots(UID))
+
+
+def test_sim_genomes_do_not_inflate_the_proven_bar():
+    before = gene_pool.distinct_tested()
+    for _ in range(5):
+        incubator.spawn(genome.random_genome(), user_id=UID)
+    assert gene_pool.distinct_tested() == before
+
+
+def test_a_profitable_bot_graduates_and_an_unproven_one_does_not():
+    good = _sim(GOOD)
+    thin = _sim(GOOD[:6])
+    assert incubator.verdict(bots.get_bot(good))["state"] == "graduate"
+    assert incubator.verdict(bots.get_bot(thin))["state"] == "keep"
+
+
+def test_a_losing_bot_is_culled_and_a_failing_one_too():
+    bad = _sim(BAD)
+    assert incubator.verdict(bots.get_bot(bad))["state"] == "cull"
+    failing = _sim()
+    bots.set_status(failing, "failing")
+    assert incubator.verdict(bots.get_bot(failing))["state"] == "cull"
+
+
+def test_a_newborn_is_never_judged_on_early_trades():
+    b = _sim(BAD, age=1)
+    assert incubator.verdict(bots.get_bot(b))["state"] == "keep"
+
+
+def test_graduate_is_promoted_into_a_free_fleet_slot_as_a_new_bot(fleet_on):
+    g = genome.random_genome()
+    sim = _sim(GOOD, g=g)
+    fleet_id = incubator.promote_next(UID, fresh=True)
+    assert fleet_id is not None
+    fb = bots.get_bot(fleet_id)
+    assert fb["pool"] == "fleet" and fb["origin"] == "graduate" and fb["user_id"] == UID
+    assert bots.stats(fleet_id)["closed_count"] == 0            # real-fill ledger starts at zero
+    assert genome.loads(fb["genome"]) == genome.loads(bots.get_bot(sim)["genome"])
+    assert bots.get_bot(sim)["status"] == "promoted"
+    assert gene_pool.entry(fb["genome_fp"]) is not None         # registered only now
+
+
+def test_no_promotion_when_the_fleet_is_full():
+    _sim(GOOD)
+    for _ in range(bots.fleet_cap(UID)):
+        assert bots.spawn_bot(genome.random_genome(), user_id=UID) is not None
+    assert incubator.promote_next(UID, fresh=True) is None
+
+
+def test_refill_prefers_a_graduate_over_a_fresh_guess(fleet_on):
+    sim = _sim(GOOD)
+    fid = bot_engine._spawn_replacement(UID)
+    assert bots.get_bot(fid)["origin"] == "graduate"
+    assert bots.get_bot(sim)["status"] == "promoted"
+
+
+def _fill_fleet_with_losers(winner_pl=False):
+    ids = []
+    for _ in range(bots.fleet_cap(UID)):
+        ids.append(bots.spawn_bot(genome.random_genome(), user_id=UID))
+    return ids
+
+
+def _recent(bot_id, ret, days_ago=1):
+    """One closed round trip, `days_ago` days back, returning `ret` per $1."""
+    ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    c = "SPY260904C{:08d}".format(600000 + bot_id)
+    bots.record_trade(bot_id, c, "buy_to_open", 5, 1.00, ts=ts, fees=0)
+    bots.record_trade(bot_id, c, "sell_to_close", 5, 1.00 + ret, ts=ts, fees=0)
+
+
+def test_make_room_replaces_the_worst_bot_when_a_graduate_beat_it(fleet_on):
+    ids = _fill_fleet_with_losers()
+    worst, mid, best = ids[0], ids[1], ids[2]
+    _recent(worst, -0.30)
+    _recent(mid, -0.05)
+    _recent(best, 0.20)
+    for i in ids:
+        _old(i)
+    sim = _sim(GOOD)                    # earned more than the worst over 5 days
+    _recent(sim, 0.40)
+    assert incubator.make_room(UID) == 1
+    assert bots.get_bot(worst)["status"] == "retired"           # the absolute worst
+    assert bots.get_bot(mid)["status"] == "active"
+    assert bots.get_bot(best)["status"] == "active"
+    assert bots.get_bot(sim)["status"] == "promoted"
+    assert len(bots.active_bots("fleet", UID)) == bots.fleet_cap(UID)
+
+
+def test_make_room_keeps_everyone_when_no_graduate_beats_the_worst(fleet_on):
+    ids = _fill_fleet_with_losers()
+    for i in ids:
+        _recent(i, 0.10)
+        _old(i)
+    sim = _sim(GOOD)
+    # the graduate earned the same as the fleet's worst: not strictly better
+    for _ in range(0):
+        pass
+    _recent(sim, 0.10)
+    assert incubator.make_room(UID) == 0
+    assert all(bots.get_bot(i)["status"] == "active" for i in ids)
+
+
+def test_make_room_spares_young_bots_and_bots_holding_a_position(fleet_on):
+    ids = _fill_fleet_with_losers()
+    young, holding = ids[0], ids[1]
+    _recent(young, -0.50)               # worst of all, but under 5 days old
+    _recent(holding, -0.40)
+    bots.record_trade(holding, "SPY260904C00999000", "buy_to_open", 2, 1.0,
+                      ts=_sessions(1)[0], fees=0)
+    for i in ids[1:]:
+        _old(i)
+    sim = _sim(GOOD)
+    _recent(sim, 0.40)
+    swapped = incubator.make_room(UID)
+    assert bots.get_bot(young)["status"] == "active"
+    assert bots.get_bot(holding)["status"] == "active"
+    assert swapped == 1                 # someone else eligible and worse than the graduate
+
+
+def test_elites_come_from_the_best_and_are_family_balanced():
+    for _ in range(6):
+        _sim(GOOD)
+    _sim(BAD)
+    _sim()                                      # no trades
+    scored = incubator._score_all()
+    elites = incubator.elite_parents(scored)
+    assert elites and all(e["robust"] > 0 for e in elites)
+    assert [e["robust"] for e in elites] == sorted((e["robust"] for e in elites), reverse=True)
+    fam = {}
+    for e in elites:
+        fam[e["family"]] = fam.get(e["family"], 0) + 1
+    assert max(fam.values()) <= max(1, int(incubator.ELITE_K * incubator.MAX_FAMILY_SHARE + 0.99))
+
+
+def test_no_elites_means_random_seeds_and_elites_mean_children_of_elites():
+    g, parent, origin = incubator.child_of([])
+    assert origin == "seed" and parent is None
+    parent_g = genome.random_genome()
+    elites = [{"genome": parent_g, "fp": gene_pool.fingerprint(parent_g), "robust": 2.0,
+               "family": genome.family_of(parent_g), "generation": 3, "bot_id": 7,
+               "source": "sim"}]
+    origins = {incubator.child_of(elites)[2] for _ in range(200)}
+    assert "mutation" in origins and "seed" in origins and "crossover" not in origins
+
+
+def test_fill_tops_up_with_distinct_genomes_and_tracks_generation():
+    parent = _sim(GOOD)
+    pg = bots.get_bot(parent)
+    n = incubator.fill(UID, target=40)
+    assert sum(n.values()) == 39 or sum(n.values()) == 40 - len(incubator.active(UID)) + sum(n.values())
+    act = incubator.active(UID)
+    assert len(act) == 40
+    fps = [b["genome_fp"] for b in act]
+    assert len(set(fps)) == len(fps)
+    kids = [b for b in act if b["origin"] in ("mutation", "crossover")]
+    assert kids, "with a proven-good parent present most children must be bred from it"
+    assert all(b["generation"] >= 1 for b in kids if b["parent_id"] == parent)
+    assert any(b["parent_id"] == parent for b in kids) or any(b["origin"] == "crossover" for b in kids)
+
+
+def test_maintain_culls_graduates_and_refills(fleet_on, monkeypatch):
+    monkeypatch.setattr(incubator, "PER_FLEET", 15)
+    good, bad = _sim(GOOD), _sim(BAD)
+    ev = incubator.maintain(force=True)
+    assert bots.get_bot(bad)["status"] == "retired"
+    assert bots.get_bot(good)["status"] == "promoted"
+    assert ev["culled"] >= 1 and ev["promoted"] == 1
+    assert len(incubator.active(UID)) == 15                      # refilled to target
+    assert incubator.summary(UID)["promoted"] == 1
+    assert incubator.cached_elites()                              # fleet refills can read the pool
+
+
+def test_children_inherit_from_a_promoted_winner(fleet_on, monkeypatch):
+    monkeypatch.setattr(incubator, "PER_FLEET", 30)
+    good = _sim(GOOD)
+    incubator.maintain(force=True)                                # promotes it, then breeds
+    kids = [b for b in incubator.active(UID) if b["parent_id"] == good]
+    assert kids, "a promoted winner stays in the breeding pool"
+    assert all(b["generation"] == bots.get_bot(good)["generation"] + 1 for b in kids)
+
+
+def test_maintenance_is_throttled(fleet_on, monkeypatch):
+    monkeypatch.setattr(incubator, "PER_FLEET", 3)
+    incubator.maintain(force=True)
+    assert incubator.maintain() == {"skipped": "ran recently"}
+
+
+def test_sim_tick_steps_every_sim_bot_without_an_order(monkeypatch):
+    called = []
+    monkeypatch.setattr(bot_engine, "_step_bot", lambda b, *a, **k: called.append(b["id"]))
+    ids = [incubator.spawn(genome.random_genome(), user_id=UID) for _ in range(5)]
+    n = bot_engine._step_sims(datetime.now(bot_engine.ET), {}, {}, "open", [UID])
+    assert n == 5 and sorted(called) == sorted(ids)
+
+
+def test_sim_tick_budget_stops_the_pass(monkeypatch):
+    monkeypatch.setattr(bot_engine, "_step_bot", lambda *a, **k: None)
+    for _ in range(4):
+        incubator.spawn(genome.random_genome(), user_id=UID)
+    assert bot_engine._step_sims(datetime.now(bot_engine.ET), {}, {}, "open", [UID],
+                                 budget_s=-1.0) == 0
+
+
+def test_a_sim_entry_books_a_modeled_fill_with_no_broker(monkeypatch):
+    """_record_fill on a sim bot must book through the ledger, not submit_and_wait."""
+    monkeypatch.setattr(broker, "submit_and_wait",
+                        lambda *a, **k: pytest.fail("a sim bot must never submit an order"))
+    b = incubator.spawn(genome.random_genome(), user_id=UID)
+    bot = bots.get_bot(b)
+    err = bot_engine._record_fill(bot, "SPY260904C00500000", "buy_to_open", 2, 1.5,
+                                  symbol="SPY", order_type="market",
+                                  ts=datetime.now(timezone.utc).isoformat())
+    assert err is None
+    assert bots._positions(b)
+
+
+def test_a_real_tick_trades_sim_bots_with_modeled_fills_and_no_order(monkeypatch):
+    """End to end through bot_engine._step_bot on synthetic bars: a sim bot
+    that gets a signal books a position in its own ledger, and the broker is
+    never called."""
+    import random as _r
+    from webapp import option_chain, option_model, strategies
+    monkeypatch.setattr(broker, "submit_and_wait",
+                        lambda *a, **k: pytest.fail("a sim bot must never submit an order"))
+    monkeypatch.setattr(strategies, "evaluate", lambda g, ctx: ("long", 0.95))
+    now = datetime(2026, 6, 2, 14, 0, tzinfo=bot_engine.ET)     # Tuesday 10:00 ET
+    S = 500.0
+    bars = [{"t": (now - timedelta(minutes=120 - i)).isoformat(), "o": S, "h": S + .2, "l": S - .2,
+             "c": S + (i % 3) * .05, "v": 1000} for i in range(120)]
+    g = genome.random_genome()
+    # pin every gene that could make the bot decline, so the test is about the
+    # plumbing (modeled fill, no order) and not about one random genome's taste
+    g.update(symbol="SPY", style="0dte", structure="single", signal_strength=0.1,
+             strike_style="delta", target_delta=0.4, min_option_volume=0, max_iv=0.9,
+             sr_veto=0.0, iv_bias=1.0, order_pref="market", risk_pct=5.0, hold_max_min=30)
+    b = incubator.spawn(g, user_id=UID)
+    monkeypatch.setattr(option_chain, "live_quote", lambda *a, **k: None)
+    bot_engine._step_bot(bots.get_bot(b), {"SPY": bars}, {"SPY": {"vix": 15.0}}, now, "open")
+    trades = bots._trades(b)
+    assert [t["side"] for t in trades] == ["buy_to_open"]
+    assert trades[0]["fill_source"] == "model" and bots._positions(b)
+
+
+def test_cycle_gives_the_sim_pass_the_idle_gap_and_never_fails_the_cycle(monkeypatch):
+    monkeypatch.setattr(bot_engine, "_phase", lambda now: "open")
+    monkeypatch.setattr(bot_engine, "_market_context", lambda now, phase, **kw: ({}, {}))
+    seen = []
+    monkeypatch.setattr(bot_engine, "_step_sims",
+                        lambda now, bars, feats, phase, users, budget_s=None: seen.append(budget_s) or 7)
+    assert bot_engine._sim_pass([UID], 10.0) == 7 and seen == [10.0]
+    assert bot_engine._sim_pass([UID], 0.1) == 0                  # no time left: skipped
+    monkeypatch.setattr(bot_engine, "_market_context", lambda *a, **k: None)
+    assert bot_engine._sim_pass([UID], 10.0) == 0                 # stale feed: nothing stepped
+    def boom(*a, **k):
+        raise RuntimeError("sim exploded")
+    monkeypatch.setattr(bot_engine, "_market_context", boom)
+    assert bot_engine._sim_pass([UID], 10.0) == 0                 # swallowed

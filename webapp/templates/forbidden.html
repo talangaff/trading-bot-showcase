@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Not allowed · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Not allowed</h1>
+  <p class="muted">{{ message }}</p>
+  <p><a class="btn ghost" href="/">← Back to the screener</a></p>
+</div>
+{% endblock %}

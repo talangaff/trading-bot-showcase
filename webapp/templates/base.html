@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}{{ APP_TITLE }}{% endblock %}</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="{{ APP_TITLE }}">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="stylesheet" href="/static/style.css?v={{ ASSET_VER }}">
+</head>
+<body>
+{% if user %}
+<header class="topbar">
+  <div class="brand"><img src="/static/favicon-32.png" alt="" width="24" height="24"> {{ APP_TITLE }}</div>
+  <nav>
+    <a href="/bots" class="{{ 'on' if active == 'bots' }}">Bot Fleet</a>
+    <a href="/bots/custom" class="{{ 'on' if active == 'custom_bots' }}">Custom Bots</a>
+    <a href="/bots/managers" class="{{ 'on' if active == 'managers' }}">Managers</a>
+    <a href="/bots/accounts" class="{{ 'on' if active == 'accounts' }}">Accounts</a>
+    <a href="/pool" class="{{ 'on' if active == 'pool' }}">Shared Pool</a>
+    <a href="/guardrails" class="{{ 'on' if active == 'guardrails' }}">Guardrails</a>
+    {% if is_admin %}
+    <a href="/admin/users" class="{{ 'on' if active == 'admin' }}">Users</a>
+    {% endif %}
+  </nav>
+  <div class="acct">
+    <span class="who" title="{{ 'admin' if is_admin else 'user' }}">{{ user.username }}{% if is_admin %} <span class="pill recommended">admin</span>{% endif %}</span>
+    <a href="/change-password">Password</a>
+    <a href="/logout">Log out</a>
+  </div>
+</header>
+{% endif %}
+
+<main class="wrap" {% block live %}{% endblock %}>
+  {% if must_change and active != '' %}
+  <div class="banner warn">You are still using a temporary password.
+    <a href="/change-password">Change it now</a>.</div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="foot">
+  For educational and research use only. Not investment advice.
+</footer>
+{% block scripts %}{% endblock %}
+<script>
+(function() {
+  // Filter/sort controls submit a form and reload the page, which would
+  // otherwise always land back at the top. Remember where the user was on
+  // this page, restore it once, and forget it again.
+  var key = "scrollY:" + location.pathname;
+  var saved = sessionStorage.getItem(key);
+  if (saved !== null) {
+    sessionStorage.removeItem(key);
+    window.scrollTo(0, parseInt(saved, 10) || 0);
+  }
+  var record = function() { sessionStorage.setItem(key, String(window.scrollY)); };
+  document.addEventListener("submit", record, true);
+  // Filter <select>s submit via onchange="this.form.submit()", and a
+  // programmatic form.submit() call does NOT fire the 'submit' event (only
+  // a real user submit or form.requestSubmit() does) — so 'change' is the
+  // only reliable hook for that pattern.
+  document.addEventListener("change", function(e) {
+    if (e.target && e.target.form) record();
+  }, true);
+})();
+</script>
+<script>
+(function() {
+  // Pages that opt in (data-live="<seconds>" on <main>) quietly re-fetch
+  // themselves and swap in the new content, so numbers stay current without a
+  // reload. The scroll position, open panels and anything being typed into are
+  // left alone; the swap is skipped while the user is mid-interaction.
+  var main = document.querySelector("main.wrap[data-live]");
+  if (!main || !window.fetch || !window.DOMParser) return;
+  var every = Math.max(10, parseInt(main.getAttribute("data-live"), 10) || 30) * 1000;
+  var busy = false;
+  function interacting() {
+    var a = document.activeElement;
+    if (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return true;
+    var sel = window.getSelection && window.getSelection();
+    return !!(sel && !sel.isCollapsed && String(sel).length);
+  }
+  function openState() {
+    return Array.prototype.map.call(main.querySelectorAll("details"), function(d) { return d.open; });
+  }
+  function tick() {
+    if (busy || document.hidden || interacting()) return;
+    busy = true;
+    fetch(location.href, {credentials: "same-origin", headers: {"X-Live": "1"}})
+      .then(function(r) {
+        if (!r.ok || r.redirected) throw new Error("stop");
+        return r.text();
+      })
+      .then(function(html) {
+        var next = new DOMParser().parseFromString(html, "text/html").querySelector("main.wrap");
+        if (!next || interacting() || next.innerHTML === main.innerHTML) return;
+        var y = window.scrollY, was = openState();
+        main.innerHTML = next.innerHTML;
+        Array.prototype.forEach.call(main.querySelectorAll("details"), function(d, i) {
+          if (i < was.length) d.open = was[i];
+        });
+        window.scrollTo(0, y);
+      })
+      .catch(function() {})
+      .then(function() { busy = false; });
+  }
+  setInterval(tick, every);
+  document.addEventListener("visibilitychange", function() { if (!document.hidden) tick(); });
+})();
+</script>
+</body>
+</html>

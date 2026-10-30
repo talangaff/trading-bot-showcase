@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Accounts · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="rowspread">
+    <h1>Accounts</h1>
+    <a href="/bots/custom" class="muted small">← Custom Bots</a>
+  </div>
+  <p class="muted small">
+    The Alpaca accounts your custom bots and managers trade on. Keys are checked against Alpaca when you save them,
+    and the secret is never shown again. A paper account can't be topped up through the API —
+    to change its balance use Reset in Alpaca's dashboard, then edit the account here with its new keys.
+  </p>
+  {% if err %}<div class="banner error">{{ err }}</div>{% endif %}
+  {% if ok %}<div class="banner ok">{{ ok }}</div>{% endif %}
+  {% if not live_enabled and rows | selectattr('live') | list %}
+  <div class="banner warn">Live trading is switched off, so bots on live accounts are not trading.</div>
+  {% endif %}
+
+  <div class="stat" style="margin-top:10px" data-account="{{ 'fleet' if fleet.connected else '' }}">
+    <div class="rowspread">
+      <div>
+        <strong>Fleet account</strong>
+        <span class="pill passed">paper</span>
+        <span class="pill open">fleet</span>
+        {% if fleet.connected %}<span class="muted small">key {{ fleet.key_hint }}</span>{% endif %}
+      </div>
+      <div class="muted small js-status">{{ 'checking Alpaca…' if fleet.connected else 'not connected — the fleet is not trading' }}</div>
+    </div>
+    <div class="muted small" style="margin-top:4px">
+      Where your {{ fleet.bots }} fleet bots trade
+      ({{ 'engine running' if fleet.running else 'engine off' }}{% if not fleet.house_engine_enabled %} — switched off house-wide{% endif %}).
+      Reserved for the fleet: custom bots and managers can't use it, its keys can't be saved as another account,
+      and it is always a paper account. The engine switch and bot count are on the <a href="/bots">Bot Fleet page</a>.
+    </div>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
+      {% if fleet.connected %}
+      <form method="post" action="/bots/accounts/fleet/test"><button type="submit" class="ghost small">Test keys &amp; data</button></form>
+      <form method="post" action="/bots/accounts/fleet/disconnect"
+            onsubmit="return confirm('Remove the fleet account keys? The fleet stops trading until new keys are saved.')">
+        <button type="submit" class="ghost small">Disconnect</button></form>
+      {% endif %}
+      <form method="post" action="/bots/accounts/fleet/feed" class="row" style="gap:6px;align-items:center">
+        <label class="small">Data feed
+          <select name="data_feed">
+            <option value="iex" {{ 'selected' if fleet.data_feed == 'iex' }}>IEX (Basic)</option>
+            <option value="sip" {{ 'selected' if fleet.data_feed == 'sip' }}>SIP (Algo Trader Plus)</option>
+          </select></label>
+        <button type="submit" class="ghost small">Save feed</button>
+      </form>
+    </div>
+    <details style="margin-top:8px" {{ 'open' if not fleet.connected }}><summary class="muted small">{{ 'Edit keys' if fleet.connected else 'Connect' }}</summary>
+      <form method="post" action="/bots/accounts/fleet/edit" class="grid" style="margin-top:8px">
+        <label>{{ 'New API key ID' if fleet.connected else 'API key ID' }} <input type="text" name="key_id" autocomplete="off" {% if fleet.connected %}placeholder="leave blank to keep"{% else %}required{% endif %}></label>
+        <label>{{ 'New API secret' if fleet.connected else 'API secret' }} <input type="password" name="secret" autocomplete="new-password" {% if fleet.connected %}placeholder="leave blank to keep"{% else %}required{% endif %}></label>
+        <div style="align-self:end"><button type="submit">Save</button></div>
+      </form>
+      <p class="muted small">New keys are verified as a paper account. If fleet bots are holding positions, the new keys
+        must be the same Alpaca account (regenerating a key is fine; switching accounts is not until they close).</p>
+    </details>
+  </div>
+
+  {% for a in rows %}
+  <div class="stat" style="margin-top:10px" data-account="{{ a.id }}">
+    <div class="rowspread">
+      <div>
+        <strong>{{ a.name }}</strong>
+        <span class="pill {{ 'avoid' if a.live else 'passed' }}">{{ 'LIVE' if a.live else 'paper' }}</span>
+        <span class="muted small">key {{ a.key_hint }}</span>
+      </div>
+      <div class="muted small js-status">checking Alpaca…</div>
+    </div>
+    <div class="muted small" style="margin-top:4px">
+      {% if a.bots or a.managers %}
+      Used by
+      {% if a.bots %}{{ a.bots | length }} bot(s){% endif %}{% if a.bots and a.managers %} and {% endif %}
+      {% if a.managers %}{% for m in a.managers %}<a href="/bots/managers/{{ m.id }}">{{ m.name }}</a>{{ ', ' if not loop.last }}{% endfor %}{% endif %}
+      {% if a.holding %} · {{ a.holding }} holding a position{% endif %}
+      {% else %}Not used by any bot or manager.{% endif %}
+    </div>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">
+      <form method="post" action="/bots/accounts/{{ a.id }}/test"><button type="submit" class="ghost small">Test keys</button></form>
+      <form method="post" action="/bots/accounts/{{ a.id }}/delete"
+            onsubmit="return confirm('Delete the {{ a.name }} account? Bookkeeping only — nothing on Alpaca is touched.')">
+        <button type="submit" class="ghost small" {% if a.bots or a.managers %}disabled title="Move or delete what uses it first"{% endif %}>Delete</button></form>
+    </div>
+    <details style="margin-top:8px"><summary class="muted small">Edit</summary>
+      <form method="post" action="/bots/accounts/{{ a.id }}/edit" class="grid" style="margin-top:8px">
+        <label>Name <input type="text" name="name" value="{{ a.name }}" required></label>
+        <label>New API key ID <input type="text" name="key_id" autocomplete="off" placeholder="leave blank to keep"></label>
+        <label>New API secret <input type="password" name="secret" autocomplete="new-password" placeholder="leave blank to keep"></label>
+        <div style="align-self:end"><button type="submit">Save</button></div>
+      </form>
+      <p class="muted small">The type ({{ 'live' if a.live else 'paper' }}) can't be changed — add a new account instead.
+        New keys are verified as a {{ 'live' if a.live else 'paper' }} account, and can't be swapped in while a bot on
+        this account is holding a position.</p>
+    </details>
+  </div>
+  {% else %}
+  {% endfor %}
+
+  {% if is_admin %}
+  <form method="post" action="/admin/live" style="margin-top:14px">
+    <input type="hidden" name="live_enabled" value="{{ '' if live_enabled else '1' }}">
+    <button type="submit" class="ghost" {% if live_enabled %}onclick="return confirm('Switch OFF all live trading? Bots on live accounts stop at once.')"{% else %}onclick="return confirm('Switch ON live trading? Bots started on live accounts will place real-money orders.')"{% endif %}>
+      {{ 'Switch OFF live trading (kill switch)' if live_enabled else 'Switch ON live trading' }}</button>
+  </form>
+  {% endif %}
+
+  <details class="settings-panel" style="margin-top:14px" {% if not rows %}open{% endif %}>
+    <summary><strong>➕ Add an account</strong></summary>
+    <form method="post" action="/bots/accounts/add" class="grid" style="margin-top:10px">
+      <label>Name <input type="text" name="name" placeholder="e.g. Paper or Main live" required></label>
+      <label>Type
+        <select name="kind"><option value="paper">paper</option><option value="live">live (real money)</option></select></label>
+      <label>API key ID <input type="text" name="key_id" autocomplete="off" required></label>
+      <label>API secret key <input type="password" name="secret" autocomplete="new-password" required></label>
+      <div style="align-self:end"><button type="submit">Add account</button></div>
+    </form>
+  </details>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function money(v) { return v == null ? '—' : '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits: 2}); }
+  document.querySelectorAll('[data-account]').forEach(function (el) {
+    var box = el.querySelector('.js-status');
+    fetch('/bots/accounts/' + el.dataset.account + '/status.json')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        box.textContent = d.error ? ('unreachable: ' + d.error)
+          : (d.status || '?') + ' · equity ' + money(d.equity) + ' · options buying power ' + money(d.options_buying_power);
+      }).catch(function () { box.textContent = 'could not check'; });
+  });
+})();
+</script>
+{% endblock %}

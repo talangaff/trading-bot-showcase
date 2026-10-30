@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}Custom Bots · {{ APP_TITLE }}{% endblock %}
+{% block live %}data-live="30"{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="rowspread">
+    <h1>Custom Bots</h1>
+    <div class="row" style="gap:8px;align-items:center">
+      <form method="post" action="/bots/custom/refresh{{ ('?' ~ request.url.query) if request.url.query }}">
+        <button type="submit" title="Re-read every bot's ledger, recompute the stats and re-query Alpaca. A browser reload alone can return cached numbers up to a minute old.">↻ Refresh</button>
+      </form>
+      <span class="muted small" title="when this page was built">as of {{ rendered_at }}</span>
+    </div>
+  </div>
+
+  <p class="muted small">
+    {% if fast_lane_ok %}⚡ Fast lane running — custom bots are checked every {{ fast_interval | round(0) | int }}s on data a few seconds old
+    (last pass {{ fast_lane_age | round(0) | int }}s ago).
+    {% else %}Fast lane is not running — custom bots are being stepped by the once-a-minute cycle instead.{% endif %}
+  </p>
+  {% if not settings.connected %}
+  <div class="banner warn">
+    No Alpaca account saved — your custom bots can't place orders until you add one on the <a href="/bots/accounts">Accounts page</a> and put a bot on it.
+    They never fall back to your fleet's keys. You can still clone and configure bots now.
+  </div>
+  {% elif settings.same_as_fleet %}
+  <div class="banner warn">
+    These are the same keys <a href="/bots">your own fleet</a> trades on — your custom bots would share that
+    account with your whole fleet. Use a separate Alpaca paper account here to test a bot on its own.
+  </div>
+  {% endif %}
+  {% if account %}
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Your Alpaca account</div>
+      {% if account.error %}
+      <div class="stat-value neg">unreachable</div><div class="muted small">{{ account.error }}</div>
+      {% else %}
+      <div class="stat-value">{{ account.equity | money if account.equity is not none else '—' }}</div>
+      <div class="muted small">{{ account.account_number or '?' }} · {{ account.status or '?' }} ·
+        options BP {{ account.options_buying_power | money if account.options_buying_power is not none else '—' }}
+        · options level {{ account.options_trading_level if account.options_trading_level is not none else '?' }}</div>
+      {% endif %}</div>
+    {% if reconcile %}
+    <div class="stat"><div class="stat-label">Ledgers vs. account</div>
+      {% if reconcile.error %}
+      <div class="stat-value neg">unknown</div><div class="muted small">{{ reconcile.error }}</div>
+      {% elif reconcile.ok %}
+      <div class="stat-value pos">in sync</div>
+      <div class="muted small">{{ reconcile.symbols }} contract(s) · checked {{ reconcile.ts | localstamp }}</div>
+      {% else %}
+      <div class="stat-value neg">{{ reconcile.mismatches | length }} mismatch · {{ reconcile.unclaimed | length }} unclaimed</div>
+      <div class="muted small">
+        {% for m in reconcile.mismatches %}{{ m.symbol }}: ledgers {{ m.ledger | num(0) }} vs account {{ m.account | num(0) }}{{ '; ' if not loop.last }}{% endfor %}
+        {% for u in reconcile.unclaimed %}{{ '; ' if reconcile.mismatches }}{{ u.symbol }}: {{ u.account | num(0) }} unclaimed{% endfor %}
+        · checked {{ reconcile.ts | localstamp }}</div>
+      {% endif %}</div>
+    {% endif %}
+    {% if api and api.account %}
+    <div class="stat"><div class="stat-label">Peak Alpaca calls/min</div>
+      <div class="stat-value {{ 'neg' if api.apis.trading.pct_of_limit and api.apis.trading.pct_of_limit >= 80 }}">
+        {{ api.apis.trading.peak }} <span class="muted small">/ {{ api.limit }}</span></div>
+      <div class="muted small">
+        {%- if api.apis.trading.peak %}
+        trading, busiest minute {{ api.apis.trading.peak_at }}Z
+        {%- if api.apis.trading.peak_bots %} with {{ api.apis.trading.peak_bots }} bot(s) &mdash;
+        {{ api.apis.trading.per_bot | num(2) }}/bot/min, so ~{{ api.apis.trading.bots_at_limit }}
+        bots would reach the limit{% endif %}
+        {%- else %}no trading calls recorded yet{% endif %}
+        · data peak {{ api.apis.data.peak }} · this minute {{ api.apis.trading.now }}
+      </div></div>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if err %}<div class="banner error">{{ err }}</div>{% endif %}
+  <p class="muted small">Alpaca accounts ({{ accounts | length }} saved, live trading {{ 'ON' if live_enabled else 'off' }})
+    are managed on the <a href="/bots/accounts">Accounts page</a>.</p>
+
+  {% if capital and capital.bots %}
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Peak capital needed</div>
+      <div class="stat-value {{ 'neg' if capital.oversubscribed }}">{{ capital.max_exposure | money }}</div>
+      <div class="muted small">most premium {{ capital.bots }} bot(s) could hold at once
+        (each at its own position cap — up to 100% of its balance) — this is what the account must fund</div></div>
+    <div class="stat"><div class="stat-label">Held right now</div>
+      <div class="stat-value">{{ capital.open_cost | money }}</div>
+      <div class="muted small">{% if capital.utilization is not none %}{{ capital.utilization | pct(0) }} of options buying power{% else %}account not readable{% endif %}</div></div>
+    <div class="stat"><div class="stat-label">Virtual capital</div>
+      <div class="stat-value">{{ capital.committed | money }}</div>
+      <div class="muted small">sum of the bots' own ledgers — bookkeeping only, never needs to exist as cash</div></div>
+  </div>
+  {% if capital.oversubscribed %}
+  <div class="banner warn">
+    <b>The account may not cover a fully-loaded fleet.</b> If every bot filled its position cap at once they
+    would need {{ capital.max_exposure | money }}, but the account can fund {{ (capital.options_buying_power if capital.options_buying_power is not none else capital.equity) | money }}
+    — short by about {{ capital.short_by | money }}. Nothing breaks: entries that don't fit are refused and
+    logged rather than sent, so no bot gets an unfair edge from ordering. To give it more room, either lower
+    the fleet target / per-bot balance, or raise the paper balance in Alpaca's dashboard
+    (<b>Reset</b> — note that wipes the account's history and issues new API keys, so do it while the fleet is
+    flat and paste the new keys in below).
+  </div>
+  {% endif %}
+  {% endif %}
+
+  <div class="agg" style="margin-top:6px">
+    <div class="stat"><div class="stat-label">Capital pool</div>
+      <div class="stat-value">{{ pool_total | money }}</div></div>
+    <div class="stat"><div class="stat-label">Allocated</div>
+      <div class="stat-value">{{ pool_used | money }}</div></div>
+    <div class="stat"><div class="stat-label">Available</div>
+      <div class="stat-value {{ 'neg' if pool_available <= 0 }}">{{ pool_available | money }}</div></div>
+  </div>
+  <form method="post" action="/bots/custom/pool" class="row" style="margin-top:8px; gap:10px">
+    <label>Total paper capital reserved for custom bots
+      <input type="number" name="custom_pool_total" step="1" min="0" value="{{ pool_total }}" style="width:10rem">
+    </label>
+    <div style="align-self:end"><button type="submit" class="ghost">Save pool total</button></div>
+  </form>
+
+  <details class="settings-panel" style="margin-top:12px" open>
+    <summary><strong>➕ Clone a bot</strong></summary>
+    <form method="post" action="/bots/custom/clone" class="grid" style="margin-top:10px">
+      <label>Source bot
+        <select name="source_id" required>
+          {% for r in clone_sources %}
+          <option value="{{ r.id }}">
+            {{ r.name }} ({{ 'custom' if r.pool == 'custom' else 'fleet' }}) — {{ r.pl_pct | pct(1) if r.pl_pct is not none else '—' }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Name (optional)
+        <input type="text" name="name" placeholder="defaults to '<source> (custom)'">
+      </label>
+      <label>Starting allocation ($)
+        <input type="number" name="allocation" step="1" min="1"
+               {% if pool_available >= 1 %}max="{{ pool_available }}"{% endif %}
+               placeholder="{{ pool_available | round(0) }} available" required>
+      </label>
+      <div style="align-self:end"><button type="submit">Clone</button></div>
+    </form>
+  </details>
+</div>
+
+<div class="card">
+  <div class="rowspread">
+    <h2>Your custom bots <span class="muted small">{{ rows|length }}</span></h2>
+  </div>
+  {% if not rows %}
+    <p class="muted">None yet — clone one above to get started.</p>
+  {% else %}
+  <div class="botgrid">
+    {% for r in rows %}
+    {% set up = r.pl_dollar > 0 %}
+    {% set tone = 'pos' if up else ('neg' if r.pl_dollar < 0 else '') %}
+    <a class="botcard {{ 'up' if up else ('down' if r.pl_dollar < 0 else '') }}" href="/bots/{{ r.id }}">
+      <div class="bc-top">
+        <span class="bc-name">{{ r.name }}</span>
+        <span class="pill {{ 'recommended' if r.status == 'active' else ('avoid' if r.status == 'failing' else 'passed') }}">{{ r.status }}</span>
+        <span class="pill {{ 'recommended' if r.enabled else 'avoid' }}">{{ 'enabled' if r.enabled else 'disabled' }}</span>
+        <span class="pill {{ 'avoid' if r.account_live else 'recommended' }}">{{ (r.account_name ~ (' · LIVE' if r.account_live else '')) if r.account_name else 'no account' }}</span>
+      </div>
+      <div class="bc-label">Account value</div>
+      <div class="bc-account {{ tone }}">{{ r.balance | money }}</div>
+      <div class="bc-pl {{ tone }}">{{ r.pl_dollar | money }} · {{ r.pl_pct | pct }}</div>
+      <svg class="bc-spark" viewBox="0 0 240 44" preserveAspectRatio="none">
+        <polyline points="{{ r.spark }}" fill="none"
+                  stroke="{{ 'var(--green)' if up else ('var(--red)' if r.pl_dollar < 0 else 'var(--grey)') }}"
+                  stroke-width="2"/>
+      </svg>
+      <div class="bc-grid">
+        <div><span class="bc-k">Drawdown</span>
+          <span class="bc-sv {{ 'neg' if r.drawdown_pct >= r.drawdown_limit * 0.6 }}">{{ r.drawdown_pct | pct(0) }}
+            <span class="muted">/ {{ r.drawdown_limit | pct(0) }}</span></span></div>
+        <div><span class="bc-k">Win rate</span><span class="bc-sv">{{ r.win_rate | pct(0) }}</span></div>
+        <div><span class="bc-k">Trades</span><span class="bc-sv">{{ r.closed_count }} / {{ r.active_days or 0 }}d</span></div>
+        <div><span class="bc-k">Overrides</span>
+          <span class="bc-sv">{{ r.guardrail_overrides|length or '—' }}</span></div>
+      </div>
+      <div class="bc-foot muted small">{{ r.genome_desc }}</div>
+      <div class="bc-foot muted small">cloned from
+        {% if r.parent_id %}bot #{{ r.parent_id }}{% else %}—{% endif %}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

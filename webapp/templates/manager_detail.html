@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}{{ m.name }} · Managers · {{ APP_TITLE }}{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="rowspread">
+    <h1>{{ m.name }}
+      <span class="pill {{ 'avoid' if account and account.live else 'passed' }}">{{ 'LIVE' if account and account.live else 'paper' }}</span>
+      <span class="pill passed">{{ m.mode | replace('_', ' ') }}</span>
+      {% if not m.enabled %}<span class="pill open">paused</span>{% endif %}
+    </h1>
+    <a href="/bots/managers" class="muted small">← Managers</a>
+  </div>
+  {% if err %}<div class="banner error">{{ err }}</div>{% endif %}
+  {% if ok %}<div class="banner ok">{{ ok }}</div>{% endif %}
+  {% if account and account.live and not live_enabled %}
+  <div class="banner warn">Live trading is switched off — this manager's bots are not trading and it will not change anything.</div>
+  {% endif %}
+  <p class="muted small">
+    {{ account.name if account else 'account removed' }} · {{ m.slots }} slots × {{ size | money }} ·
+    max {{ cap | money }} ({{ m.position_pct | num(0) }}%) of a bot's money per trade ·
+    last pass {{ (m.last_run_at | localstamp) if m.last_run_at else 'never' }}
+    · market {{ 'open' if market_open else 'closed' }}
+  </p>
+
+  <div class="row" style="gap:8px;flex-wrap:wrap">
+    <form method="post" action="/bots/managers/{{ m.id }}/run"><button type="submit" class="ghost">Run now (dry run — changes nothing)</button></form>
+    <form method="post" action="/bots/managers/{{ m.id }}/toggle"><button type="submit" class="ghost">{{ 'Pause manager' if m.enabled else 'Resume manager' }}</button></form>
+    <form method="post" action="/bots/managers/{{ m.id }}/delete" onsubmit="return confirm('Delete this manager? Its bots are kept and keep trading; nothing is closed.')">
+      <button type="submit" class="ghost">Delete manager</button></form>
+  </div>
+
+  <h2 style="margin-top:16px">Slots</h2>
+  <table class="results">
+    <thead><tr><th>Slot</th><th>Bot</th><th>Copied from</th><th>Balance</th><th>P&amp;L</th><th>Trades</th><th>Drawdown</th><th>Holding</th></tr></thead>
+    <tbody>
+    {% for s in slot_cards %}
+      <tr>
+        <td>{{ s.slot }}</td>
+        {% if s.bot %}
+        <td style="text-align:left"><a href="/bots/{{ s.bot.id }}">{{ s.bot.name }}</a>
+          {% if s.bot.drain %}<span class="pill open">finishing its position, then replaced</span>{% endif %}</td>
+        <td>{% if s.source %}<a href="/bots/{{ s.source.id }}">{{ s.source.name }}</a>{% else %}—{% endif %}</td>
+        <td>{{ s.row.balance | money if s.row else (s.bot.start_balance | money) }}</td>
+        <td class="{{ 'pos' if s.row and s.row.pl_dollar > 0 else 'neg' if s.row and s.row.pl_dollar < 0 }}">
+          {{ s.row.pl_dollar | money if s.row else '—' }}</td>
+        <td>{{ s.row.closed_count if s.row else 0 }}</td>
+        <td>{{ s.row.drawdown_pct | pct(1) if s.row and s.row.drawdown_pct is not none else '—' }}</td>
+        <td>{{ s.row.open_count if s.row else 0 }}</td>
+        {% else %}
+        <td colspan="7" class="muted" style="text-align:left">empty — filled at the next pass if a fleet bot qualifies</td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if proposals %}
+  <h2 style="margin-top:16px">Waiting for your approval</h2>
+  {% for p in proposals %}
+  <div class="stat" style="margin-top:8px">
+    <div class="rowspread">
+      <div>
+        <strong>Slot {{ p.action.slot }}:</strong>
+        {{ 'add' if p.action.type == 'fill' else 'replace bot #' ~ p.action.old_bot_id ~ ' with' }}
+        <strong>{{ p.action.source_name }}</strong>
+        <div class="muted small">{{ p.action.reason }} · proposed {{ p.ts | localstamp }}</div>
+      </div>
+      <div class="row" style="gap:6px">
+        <form method="post" action="/bots/managers/proposals/{{ p.id }}/approve"><button type="submit">Approve</button></form>
+        <form method="post" action="/bots/managers/proposals/{{ p.id }}/reject"><button type="submit" class="ghost">Reject</button></form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  <h2 style="margin-top:16px">Next pass would…</h2>
+  {% if plan.actions %}
+  <ul>
+    {% for a in plan.actions %}
+    <li>slot {{ a.slot }}:
+      {% if a.type == 'fill' %}add <strong>{{ a.source_name }}</strong>
+      {% else %}replace bot #{{ a.old_bot_id }} with <strong>{{ a.source_name }}</strong>{% endif %}
+      <span class="muted small">— {{ a.reason }}</span></li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">nothing — every slot is filled and healthy.</p>{% endif %}
+  {% for n in plan.notes %}<p class="muted small">{{ n }}</p>{% endfor %}
+  <p class="muted small">{{ plan.n_candidates }} fleet bot(s) qualify right now at {{ size | money }} per bot.
+    {% if plan.candidates %}Best: {% for c in plan.candidates[:5] %}{{ c.name }} ({{ c.robust_fitness | num(2) }}){{ ', ' if not loop.last }}{% endfor %}.{% endif %}</p>
+
+  <details class="settings-panel" style="margin-top:14px">
+    <summary><strong>Settings</strong></summary>
+    <form method="post" action="/bots/managers/{{ m.id }}/edit" class="grid" style="margin-top:10px">
+      <label>Name <input type="text" name="name" value="{{ m.name }}"></label>
+      <label>Account
+        <select name="account_id">
+          {% for a in accounts %}<option value="{{ a.id }}" {{ 'selected' if a.id == m.account_id }}>{{ a.name }} — {{ 'LIVE' if a.live else 'paper' }}</option>{% endfor %}
+        </select></label>
+      <label>Slots <input type="number" name="slots" min="1" max="10" value="{{ m.slots }}"></label>
+      <label>Total money ($) <input type="number" name="total_budget" min="1" step="1" value="{{ m.total_budget | round(2) }}"></label>
+      <label>Max % per trade <input type="number" name="position_pct" min="1" max="100" step="1" value="{{ m.position_pct | round(2) }}"></label>
+      <label>Mode
+        <select name="mode">
+          {% for md in modes %}<option value="{{ md }}" {{ 'selected' if md == m.mode }}>{{ md | replace('_', ' ') }}</option>{% endfor %}
+        </select></label>
+      {% if account and account.live %}
+      <label>Live account name (only if changing account) <input type="text" name="confirm_name" autocomplete="off"></label>
+      {% endif %}
+      {% for k, v in rules.items() %}
+      <label class="small">{{ k | replace('_', ' ') }}
+        {% if v is sameas true or v is sameas false %}
+        <select name="rule_{{ k }}"><option value="1" {{ 'selected' if v }}>yes</option><option value="0" {{ 'selected' if not v }}>no</option></select>
+        {% else %}<input type="number" step="any" name="rule_{{ k }}" value="{{ v }}">{% endif %}
+      </label>
+      {% endfor %}
+      <div style="align-self:end"><button type="submit">Save</button></div>
+    </form>
+    <p class="muted small">A changed budget applies to bots added from now on — bots already running keep their allocation.
+      The per-trade % applies to every bot at once.
+      {% if account and account.live %}Auto on this live account unlocks after {{ auto_days }} days of dry-run/propose passes
+      ({{ 'ready' if auto_ready else 'not yet' }}).{% endif %}</p>
+  </details>
+
+  <h2 style="margin-top:16px">History</h2>
+  <table class="results">
+    <thead><tr><th>When</th><th>What</th><th>Slot</th><th style="text-align:left">Why</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+      <tr>
+        <td>{{ e.ts | localstamp }}</td>
+        <td>{{ e.kind | replace('_', ' ') }}</td>
+        <td>{{ e.slot if e.slot else '' }}</td>
+        <td class="errcell">{{ e.reason }}{% if e.detail and e.detail.source_name %} → {{ e.detail.source_name }}{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">nothing yet</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
